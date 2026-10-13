@@ -1,0 +1,72 @@
+{
+  "name": "traceforce-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TraceForce Engine — an evidence-first on-chain investigation engine.",
+  "engines": {
+    "node": ">=22.0.0 <25"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/unit/*.test.ts",
+    "test:e2e": "playwright test",
+    "check": "npm run lint && npm run typecheck && npm test",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/database/migrate.ts",
+    "db:check": "drizzle-kit check",
+    "db:studio": "drizzle-kit studio",
+    "worker:once": "node --conditions=react-server --import tsx scripts/investigation-worker.ts",
+    "worker:poll": "node --conditions=react-server --import tsx scripts/investigation-worker.ts --poll",
+    "engine:serve": "node --conditions=react-server --import tsx scripts/scan-engine.ts",
+    "db:setup:local": "tsx scripts/database/setup-local.ts",
+    "db:migrate:test": "tsx scripts/database/migrate.ts --test",
+    "test:db": "node --conditions=react-server --import tsx --test --test-concurrency=1 tests/integration/database-jobs.test.ts tests/integration/visitor-admission.test.ts",
+    "verify:base": "node --conditions=react-server --import tsx scripts/verify-base-provider.ts",
+    "verify:full": "node --conditions=react-server --import tsx scripts/verify-full-crawl.ts",
+    "inspect:swarm": "node scripts/inspect-swarm-reference.mjs",
+    "verify:local": "tsx scripts/verify-local-workflow.ts",
+    "ai:serve": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local-ai.ps1",
+    "ai:setup": "tsx scripts/setup-local-agent.ts",
+    "ai:benchmark": "node --conditions=react-server --import tsx scripts/benchmark-local-agent.ts"
+  },
+  "dependencies": {
+    "@tabler/icons-react": "3.49.0",
+    "@vercel/functions": "3.9.11",
+    "clsx": "2.1.1",
+    "dotenv": "18.0.7",
+    "drizzle-orm": "0.45.4",
+    "lucide-react": "1.55.0",
+    "motion": "14.1.0",
+    "mysql2": "3.24.5",
+    "next": "16.4.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "server-only": "0.0.1",
+    "tailwind-merge": "3.7.0",
+    "viem": "2.57.4",
+    "zod": "4.6.6"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.0",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "drizzle-kit": "0.31.11",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.4.0",
+    "postcss": "8.5.29",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.15",
+    "typescript": "~5.9.3"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.28.2"
+    }
+  }
+}

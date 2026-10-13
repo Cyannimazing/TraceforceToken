@@ -1,0 +1,558 @@
+{
+  "version": "5",
+  "dialect": "mysql",
+  "id": "cd00bb83-59c9-475c-80e9-1f0f3c6f81c3",
+  "prevId": "d5eab4f1-b9d1-49aa-bc51-b9b13e607888",
+  "tables": {
+    "investigation_evidence": {
+      "name": "investigation_evidence",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "char(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "investigation_id": {
+          "name": "investigation_id",
+          "type": "char(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "enum('funding','transfer','swap','contract','metadata')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source_event_id": {
+          "name": "source_event_id",
+          "type": "varchar(191)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "transaction_hash": {
+          "name": "transaction_hash",
+          "type": "char(66)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "block_number": {
+          "name": "block_number",
+          "type": "bigint unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "log_index": {
+          "name": "log_index",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "observed_at": {
+          "name": "observed_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "from_address": {
+          "name": "from_address",
+          "type": "char(42)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "to_address": {
+          "name": "to_address",
+          "type": "char(42)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "asset_address": {
+          "name": "asset_address",
+          "type": "char(42)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "asset_symbol": {
+          "name": "asset_symbol",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "amount_raw": {
+          "name": "amount_raw",
+          "type": "varchar(78)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "details": {
+          "name": "details",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP(3)"
+        }
+      },
+      "indexes": {
+        "evidence_investigation_source_uidx": {
+          "name": "evidence_investigation_source_uidx",
+          "columns": [
+            "investigation_id",
+            "source_event_id"
+          ],
+          "isUnique": true
+        },
+        "evidence_investigation_observed_idx": {
+          "name": "evidence_investigation_observed_idx",
+          "columns": [
+            "investigation_id",
+            "observed_at"
+          ],
+          "isUnique": false
+        },
+        "evidence_transaction_hash_idx": {
+          "name": "evidence_transaction_hash_idx",
+          "columns": [
+            "transaction_hash"
+          ],
+          "isUnique": false
+        },
+        "evidence_from_address_idx": {
+          "name": "evidence_from_address_idx",
+          "columns": [
+            "from_address"
+          ],
+          "isUnique": false
+        },
+        "evidence_to_address_idx": {
+          "name": "evidence_to_address_idx",
+          "columns": [
+            "to_address"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "investigation_evidence_investigation_id_investigations_id_fk": {
+          "name": "investigation_evidence_investigation_id_investigations_id_fk",
+          "tableFrom": "investigation_evidence",
+          "tableTo": "investigations",
+          "columnsFrom": [
+            "investigation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "restrict"
+        }
+      },
+      "compositePrimaryKeys": {
+        "investigation_evidence_id": {
+          "name": "investigation_evidence_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {
+        "evidence_transaction_hash_chk": {
+          "name": "evidence_transaction_hash_chk",
+          "value": "`investigation_evidence`.`transaction_hash` IS NULL OR (`investigation_evidence`.`transaction_hash` REGEXP '^0x[0-9a-f]{64}$' AND CAST(`investigation_evidence`.`transaction_hash` AS BINARY) = CAST(LOWER(`investigation_evidence`.`transaction_hash`) AS BINARY))"
+        },
+        "evidence_from_address_chk": {
+          "name": "evidence_from_address_chk",
+          "value": "`investigation_evidence`.`from_address` IS NULL OR (`investigation_evidence`.`from_address` REGEXP '^0x[0-9a-f]{40}$' AND CAST(`investigation_evidence`.`from_address` AS BINARY) = CAST(LOWER(`investigation_evidence`.`from_address`) AS BINARY))"
+        },
+        "evidence_to_address_chk": {
+          "name": "evidence_to_address_chk",
+          "value": "`investigation_evidence`.`to_address` IS NULL OR (`investigation_evidence`.`to_address` REGEXP '^0x[0-9a-f]{40}$' AND CAST(`investigation_evidence`.`to_address` AS BINARY) = CAST(LOWER(`investigation_evidence`.`to_address`) AS BINARY))"
+        },
+        "evidence_asset_address_chk": {
+          "name": "evidence_asset_address_chk",
+          "value": "`investigation_evidence`.`asset_address` IS NULL OR (`investigation_evidence`.`asset_address` REGEXP '^0x[0-9a-f]{40}$' AND CAST(`investigation_evidence`.`asset_address` AS BINARY) = CAST(LOWER(`investigation_evidence`.`asset_address`) AS BINARY))"
+        },
+        "evidence_amount_raw_chk": {
+          "name": "evidence_amount_raw_chk",
+          "value": "`investigation_evidence`.`amount_raw` IS NULL OR (`investigation_evidence`.`amount_raw` REGEXP '^(0|[1-9][0-9]{0,77})$' AND (CHAR_LENGTH(`investigation_evidence`.`amount_raw`) < 78 OR `investigation_evidence`.`amount_raw` <= '115792089237316195423570985008687907853269984665640564039457584007913129639935'))"
+        }
+      }
+    },
+    "investigation_jobs": {
+      "name": "investigation_jobs",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "char(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('queued','running','completed','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "parameters": {
+          "name": "parameters",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "stage": {
+          "name": "stage",
+          "type": "varchar(120)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'queued'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "max_attempts": {
+          "name": "max_attempts",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 3
+        },
+        "available_at": {
+          "name": "available_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP(3)"
+        },
+        "lease_token": {
+          "name": "lease_token",
+          "type": "char(36)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lease_expires_at": {
+          "name": "lease_expires_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "report": {
+          "name": "report",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "error": {
+          "name": "error",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP(3)"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP(3)"
+        }
+      },
+      "indexes": {
+        "investigation_jobs_queue_idx": {
+          "name": "investigation_jobs_queue_idx",
+          "columns": [
+            "status",
+            "available_at",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "investigation_jobs_recovery_idx": {
+          "name": "investigation_jobs_recovery_idx",
+          "columns": [
+            "status",
+            "lease_expires_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "investigation_jobs_id": {
+          "name": "investigation_jobs_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {
+        "investigation_jobs_attempts_chk": {
+          "name": "investigation_jobs_attempts_chk",
+          "value": "`investigation_jobs`.`attempts` <= 3 AND `investigation_jobs`.`max_attempts` BETWEEN 1 AND 3"
+        },
+        "investigation_jobs_lease_chk": {
+          "name": "investigation_jobs_lease_chk",
+          "value": "(`investigation_jobs`.`status` = 'running' AND `investigation_jobs`.`lease_token` IS NOT NULL AND `investigation_jobs`.`lease_expires_at` IS NOT NULL) OR (`investigation_jobs`.`status` <> 'running' AND `investigation_jobs`.`lease_token` IS NULL AND `investigation_jobs`.`lease_expires_at` IS NULL)"
+        },
+        "investigation_jobs_report_chk": {
+          "name": "investigation_jobs_report_chk",
+          "value": "(`investigation_jobs`.`status` = 'completed' AND `investigation_jobs`.`report` IS NOT NULL) OR (`investigation_jobs`.`status` <> 'completed' AND `investigation_jobs`.`report` IS NULL)"
+        }
+      }
+    },
+    "investigation_queue_guard": {
+      "name": "investigation_queue_guard",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "investigation_queue_guard_id": {
+          "name": "investigation_queue_guard_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {
+        "investigation_queue_guard_singleton_chk": {
+          "name": "investigation_queue_guard_singleton_chk",
+          "value": "`investigation_queue_guard`.`id` = 1"
+        }
+      }
+    },
+    "investigations": {
+      "name": "investigations",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "char(36)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "chain": {
+          "name": "chain",
+          "type": "enum('base')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'base'"
+        },
+        "chain_id": {
+          "name": "chain_id",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 8453
+        },
+        "token_address": {
+          "name": "token_address",
+          "type": "char(42)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "token_name": {
+          "name": "token_name",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "token_symbol": {
+          "name": "token_symbol",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "token_decimals": {
+          "name": "token_decimals",
+          "type": "int unsigned",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "total_supply_raw": {
+          "name": "total_supply_raw",
+          "type": "varchar(78)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "status": {
+          "name": "status",
+          "type": "enum('draft','collecting','completed','failed')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'draft'"
+        },
+        "coverage": {
+          "name": "coverage",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "provenance": {
+          "name": "provenance",
+          "type": "json",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "summary": {
+          "name": "summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP(3)"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "datetime(3)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "CURRENT_TIMESTAMP(3)"
+        }
+      },
+      "indexes": {
+        "investigations_chain_token_created_idx": {
+          "name": "investigations_chain_token_created_idx",
+          "columns": [
+            "chain",
+            "token_address",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "investigations_status_created_idx": {
+          "name": "investigations_status_created_idx",
+          "columns": [
+            "status",
+            "created_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "investigations_id": {
+          "name": "investigations_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {
+        "investigations_base_chain_id_chk": {
+          "name": "investigations_base_chain_id_chk",
+          "value": "`investigations`.`chain_id` = 8453"
+        },
+        "investigations_token_address_chk": {
+          "name": "investigations_token_address_chk",
+          "value": "`investigations`.`token_address` REGEXP '^0x[0-9a-f]{40}$' AND CAST(`investigations`.`token_address` AS BINARY) = CAST(LOWER(`investigations`.`token_address`) AS BINARY)"
+        },
+        "investigations_token_decimals_chk": {
+          "name": "investigations_token_decimals_chk",
+          "value": "`investigations`.`token_decimals` IS NULL OR `investigations`.`token_decimals` <= 255"
+        },
+        "investigations_total_supply_raw_chk": {
+          "name": "investigations_total_supply_raw_chk",
+          "value": "`investigations`.`total_supply_raw` IS NULL OR (`investigations`.`total_supply_raw` REGEXP '^(0|[1-9][0-9]{0,77})$' AND (CHAR_LENGTH(`investigations`.`total_supply_raw`) < 78 OR `investigations`.`total_supply_raw` <= '115792089237316195423570985008687907853269984665640564039457584007913129639935'))"
+        }
+      }
+    }
+  },
+  "views": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "tables": {},
+    "indexes": {}
+  }
+}

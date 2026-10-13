@@ -1,0 +1,57 @@
+[Unit]
+Description=TraceForce Engine private CPU Ollama runtime
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ollama
+Group=ollama
+# Confirm the installed binary path before installing this unit.
+ExecStart=/usr/bin/ollama serve
+Environment=HOME=/var/lib/traceforce-ollama
+Environment=OLLAMA_MODELS=/var/lib/traceforce-ollama/models
+Environment=OLLAMA_HOST=127.0.0.1:11434
+Environment=OLLAMA_NO_CLOUD=1
+Environment=OLLAMA_NUM_PARALLEL=1
+Environment=OLLAMA_MAX_LOADED_MODELS=1
+Environment=OLLAMA_MAX_QUEUE=1
+Environment=OLLAMA_CONTEXT_LENGTH=4096
+Environment=OLLAMA_KEEP_ALIVE=0
+StateDirectory=traceforce-ollama
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# A CPU-only service: GPU devices are not exposed to the process.
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+CPUAccounting=true
+CPUQuota=175%
+MemoryAccounting=true
+MemoryHigh=5G
+# About 5.77 GB, below a 6 GB model-service ceiling; not a measured fit claim.
+MemoryMax=5500M
+MemorySwapMax=0
+TasksMax=128
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=50
+
+[Install]
+WantedBy=multi-user.target

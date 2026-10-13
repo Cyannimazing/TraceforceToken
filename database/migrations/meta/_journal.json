@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1791770413891,
+      "tag": "0000_traceforge_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1791771732763,
+      "tag": "0001_durable_investigation_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1791772801609,
+      "tag": "0002_public_scan_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1791802156812,
+      "tag": "0003_visitor_admission",
+      "breakpoints": true
+    }
+  ]
+}
