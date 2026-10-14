@@ -1,14 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { browserFixture, getBrowserWalletFlagsFixture } from "../fixtures/report";
 import { assessInvestigationReport } from "../../src/domain/investigations/report-assessment";
-import { expectedDecisionWeights } from "../fixtures/decision-weights";
+
 
 test.use({ colorScheme: "dark" });
 
 for (const contractDominated of [false, true]) {
   test(`the ${contractDominated ? "contract" : "creator"} concern report distinguishes earned points from its possible score`, async ({ page }) => {
     const report = getBrowserWalletFlagsFixture({ contractDominated });
-    const assessment = assessInvestigationReport(report), expected = expectedDecisionWeights(assessment);
+    const assessment = assessInvestigationReport(report);
     // Independently worked examples of the disclosed 1.3 policy. These fixtures
     // have exact integer balances: 99,000 wallet Float in the creator case and
     // 14,355 wallet Float after excluding the contract in the second case.
@@ -36,7 +36,7 @@ for (const contractDominated of [false, true]) {
       const range = gauge.getByLabel("Score range", { exact: true });
       await expect(range).not.toBeVisible();
       await gauge.locator("details > summary").click();
-      await expect(range).toHaveText(`Possible score: ${minimum}–${maximum} · ${assessment.overallScore === null ? "incomplete" : "assessed"}`);
+      await expect(range).toHaveText(`Possible score: ${minimum}–${maximum} · ${assessment.overallScore === null ? "incomplete checks" : "assessed"}`);
       await expect(range).toBeVisible();
       const geometry = await range.evaluate((element) => {
         const box = element.getBoundingClientRect(), panel = element.closest("section")!.getBoundingClientRect();
@@ -46,17 +46,13 @@ for (const contractDominated of [false, true]) {
       await expect(gauge.getByText("DANGER", { exact: true })).toBeVisible();
       await gauge.locator("details > summary").click();
     }
-    const verdict = page.getByRole("region", { name: "VERDICT OUTPUT", exact: true });
-    await expect(verdict.getByText("AVOID", { exact: true }).first()).toBeVisible();
-    await verdict.locator("details > summary").first().click();
-    const receipt = JSON.parse(await verdict.getByLabel("Verdict receipt", { exact: true }).innerText());
-    expect(receipt).toMatchObject({ model: "traceforce-judge-1.0.0", confidence: null, weight_kind: "normalized-rule-weights", score: assessment.displayedScore, earned_points: assessment.assessedPoints, score_range: { minimum, maximum } });
-    for (const key of ["avoid", "caution", "ok"] as const) expect(receipt.p[key]).toBeCloseTo(expected.weights[key], 10);
-    const xray = verdict.getByRole("region", { name: "DECISION X-RAY", exact: true });
-    await expect(xray).toBeVisible();
-    await expect(xray).toContainText(/normali[sz]ed/);
-    const displayed = await verdict.getByLabel("Verdict decision weights", { exact: true }).locator("dd").allTextContents();
-    expect(displayed.reduce((sum, value) => sum + Math.round(parseFloat(value) * 10), 0)).toBe(1000);
-    displayed.forEach((value, index) => expect(Math.abs(parseFloat(value) - Object.values(expected.weights)[index] * 100)).toBeLessThanOrEqual(0.1));
+    const verdict = page.getByRole("region", { name: "Important checks", exact: true });
+    await expect(verdict.getByText(assessment.verdict, { exact: true })).toBeVisible();
+    await expect(verdict).toHaveAttribute("data-verdict", assessment.verdict);
+    await expect(verdict.locator("pre")).toHaveCount(0);
+    await verdict.locator("details > summary").click();
+    await expect(verdict).toContainText("not a chance of profit or a guarantee of safety");
+    const score = page.getByRole("region", { name: "Score breakdown", exact: true });
+    for (const category of assessment.categories) await expect(score.locator(`[data-category-id="${category.id}"]`)).toContainText(`${category.points ?? 0}/${category.possiblePoints}`);
   });
 }

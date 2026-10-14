@@ -15,12 +15,15 @@ import { validateTransferCrawl } from "./transfer-crawl";
 import { creatorFundingCoverageSchema, validateCreatorFundingCoverage } from "./creator-funding";
 import { creationAnnotationSchema, validateCreationAnnotations } from "./creator-attribution";
 import { initialLiquiditySchema, purchaseSchema, validateLiquiditySnapshot, validateMarketAnnotations, validateWalletActivitySnapshot } from "./chain-snapshots";
+import { validateExitQuote } from "./exit-quote";
 
 const ZERO = `0x${"0".repeat(40)}`;
 const UINT256_MAX = (1n << 256n) - 1n;
 const WINDOW_SECONDS = 600;
 const STATUSES = new Set<CoverageStatus>(["complete", "partial", "unavailable", "not_examined"]);
 const VERSION = "1.0.0";
+// Bound duplicate narration, never acquired records, graph edges or group proof.
+export const MAX_DETAILED_TRANSFER_FINDINGS = 128;
 
 export class AnalysisInputError extends Error {
   constructor(field: string) {
@@ -209,6 +212,11 @@ function normalizeDataset(input: InvestigationDataset): InvestigationDataset {
   requireValue(input.evidence.length <= 100_000, "evidence budget");
   const pools = sorted(input.pools.map((item) => address(item, "pool address")));
   const hubs = sorted(input.hubs.map((item) => address(item, "hub address")));
+  let exitQuote: InvestigationDataset["exitQuote"];
+  if (input.exitQuote !== undefined) {
+    try { exitQuote = validateExitQuote(input.exitQuote, normalizedToken, range.to, holderSnapshot, walletActivitySnapshot, pools); }
+    catch { throw new AnalysisInputError("pinned exit quote"); }
+  }
   const coverage = input.coverage;
   requireValue(STATUSES.has(coverage.transfers) && Array.isArray(coverage.funding) && Array.isArray(coverage.warnings), "coverage statuses");
   const eligibleWallets = integer(coverage.eligibleWallets, "eligible wallets");
@@ -304,6 +312,7 @@ function normalizeDataset(input: InvestigationDataset): InvestigationDataset {
     ...(holderSnapshot ? { holderSnapshot } : {}),
     ...(walletActivitySnapshot ? { walletActivitySnapshot } : {}),
     ...(liquiditySnapshot ? { liquiditySnapshot } : {}),
+    ...(exitQuote ? { exitQuote } : {}),
     evidence: [...events.values()].sort(compareEvents),
     coverage: {
       transfers: coverage.transfers,
@@ -427,7 +436,9 @@ export function analyzeInvestigation(
     if (recipients.length < 2) continue;
     add({ id: `shared-funding:${source}`, category: "funding", title: "Shared observed native funding source", explanation: `This address sent native ETH to ${recipients.length} distinct observed token wallets. Its public-service or hub status is unknown, so shared funding supports only a qualified association.`, confidence: "low", wallets: [source, ...recipients], evidenceIds: events.map((event) => event.id), limitations: ["Unlisted exchanges, bridges, and services may fund unrelated users.", "Shared funding does not establish common ownership or coordinated intent.", "Funding observations are bounded and internal transfers were not examined."] }, "shared-observed-native-source");
   }
-  for (const event of qualifyingEdges.filter((item) => item.kind === "transfer")) {
+  const directTransfers = qualifyingEdges.filter((item) => item.kind === "transfer");
+  const omittedTransferSummaries = Math.max(0, directTransfers.length - MAX_DETAILED_TRANSFER_FINDINGS);
+  for (const event of directTransfers.slice(0, MAX_DETAILED_TRANSFER_FINDINGS)) {
     add({ id: `transfer:${event.id}`, category: "connections", title: "Direct token transfer relationship", explanation: "An observed token transfer connects these addresses. Payments, custody, and distribution are alternative explanations; this is not an ownership inference.", confidence: "medium", wallets: [event.from, event.to], evidenceIds: [event.id], limitations: ["A transfer alone does not establish common control or coordinated intent."] }, "direct-token-transfer");
   }
   const components = new Components();
@@ -485,7 +496,9 @@ export function analyzeInvestigation(
     }
   }
   const missingFunding = sorted(tokenWallets).filter((wallet) => fundingBounds.get(wallet)?.status !== "complete");
-  const warnings = sorted([...coverage.warnings, ...missingFunding.map((wallet) => `Funding coverage for ${wallet} is ${fundingBounds.get(wallet)?.status ?? "not_examined"}.`)]);
+  const warnings = sorted([...coverage.warnings,
+    ...(omittedTransferSummaries ? [`Detailed summaries cover ${MAX_DETAILED_TRANSFER_FINDINGS} of ${directTransfers.length} qualifying token transfers; ${omittedTransferSummaries} transfers have no individual finding or timeline summary. All evidence, connections and group proofs are retained.`] : []),
+    ...missingFunding.map((wallet) => `Funding coverage for ${wallet} is ${fundingBounds.get(wallet)?.status ?? "not_examined"}.`)]);
   const reportCoverage = { ...coverage, warnings };
   const snapshot = dataset.holderSnapshot;
   const balanceDisclosure = snapshot ? `Pinned finalized balances are verified for ${snapshot.balances.verifiedWallets} of ${snapshot.balances.requestedWallets} discovered candidates at block ${snapshot.block.number}. Latest indexed discovery is not a finalized holder census. Live-current balances and lifetime histories remain unknown.` : "Current balances and lifetime histories are not reconstructed.";
@@ -506,5 +519,5 @@ export function analyzeInvestigation(
     description: finding.explanation,
     evidenceIds: finding.evidenceIds,
   })).sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
-  return { schemaVersion: 1, id, generatedAt, mode: "live", token, range, coverage: reportCoverage, ...(snapshot ? { holderSnapshot: snapshot } : {}), ...(dataset.walletActivitySnapshot ? { walletActivitySnapshot: dataset.walletActivitySnapshot } : {}), ...(dataset.liquiditySnapshot ? { liquiditySnapshot: dataset.liquiditySnapshot } : {}), infrastructure: { pools: dataset.pools, hubs: dataset.hubs }, summary: `${tokenWallets.size} discovered token participants; ${groups.length} evidence-linked groups; ${findings.filter((finding) => finding.category === "selling").length} qualified linked-wallet selling windows. Transfer coverage: ${coverage.transfers}. Funding examined: ${coverage.examinedWallets}/${coverage.eligibleWallets}. Relationships do not establish ownership. ${snapshot ? `Pinned balances verified: ${snapshot.balances.verifiedWallets}/${snapshot.balances.requestedWallets}; live-current balances remain unknown.` : "Balances remain unknown."}`, wallets, connections, groups, findings, story, evidence };
+  return { schemaVersion: 1, id, generatedAt, mode: "live", token, range, coverage: reportCoverage, ...(snapshot ? { holderSnapshot: snapshot } : {}), ...(dataset.walletActivitySnapshot ? { walletActivitySnapshot: dataset.walletActivitySnapshot } : {}), ...(dataset.liquiditySnapshot ? { liquiditySnapshot: dataset.liquiditySnapshot } : {}), ...(dataset.exitQuote ? { exitQuote: dataset.exitQuote } : {}), infrastructure: { pools: dataset.pools, hubs: dataset.hubs }, summary: `${tokenWallets.size} discovered token participants; ${groups.length} evidence-linked groups; ${findings.filter((finding) => finding.category === "selling").length} qualified linked-wallet selling windows. Transfer coverage: ${coverage.transfers}. Funding examined: ${coverage.examinedWallets}/${coverage.eligibleWallets}. Relationships do not establish ownership. ${snapshot ? `Pinned balances verified: ${snapshot.balances.verifiedWallets}/${snapshot.balances.requestedWallets}; live-current balances remain unknown.` : "Balances remain unknown."}`, wallets, connections, groups, findings, story, evidence };
 }

@@ -9,6 +9,8 @@ import { validateTransferCrawl } from "@/domain/investigations/transfer-crawl";
 import { creationAnnotationSchema, validateCreationAnnotations } from "@/domain/investigations/creator-attribution";
 import { deriveHolderTableDistribution } from "@/domain/investigations/holder-table-distribution";
 import { assessInvestigationReport } from "@/domain/investigations/report-assessment";
+import { buildPlainLanguagePacket, plainLanguageDecisionContext } from "@/domain/investigations/plain-language-summary";
+import { swarmAssessmentContextSchema } from "./swarm-assessment-context";
 
 export class InvestigatorContextError extends Error {
   constructor(public readonly code: "INVALID_CONTEXT" | "CONTEXT_LIMIT") { super(code); }
@@ -23,10 +25,11 @@ const positiveAmount = z.string().regex(/^[1-9][0-9]{0,77}$/).refine((value) => 
 const percent = z.string().regex(/^(?:100\.00|(?:0|[1-9][0-9]?)\.[0-9]{2})$/).nullable();
 const assessmentCategory = z.enum(["swarm", "fresh", "insiders", "concentration", "snipers", "dev"]);
 const scorePoints = z.number().finite().min(0).max(100);
-export const assessmentContextSchema = z.object({
+export const localAssessmentContextSchema = z.object({
   model: z.literal("traceforce-judge-1.0.0"), ruleVersion: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+$/).max(24),
   earnedScore: scorePoints, displayedScore: z.number().int().min(0).max(100).optional(), scoreRange: z.object({ minimum: scorePoints, maximum: scorePoints }).strict(),
-  verdict: z.enum(["AVOID", "CAUTION", "REVIEW", "INSUFFICIENT"]), assessedPossiblePoints: scorePoints, possiblePoints: z.literal(100),
+  verdict: z.enum(["AVOID", "CAUTION", "REVIEW", "OK", "INSUFFICIENT"]), assessedPossiblePoints: scorePoints, possiblePoints: z.literal(100),
+  complete: z.boolean().optional(), missingChecks: z.array(text(80)).max(12).optional(),
   weights: z.object({ avoid: z.number().finite().min(0).max(1), caution: z.number().finite().min(0).max(1), ok: z.number().finite().min(0).max(1) }).strict(),
   categories: z.array(z.object({ id: assessmentCategory, points: scorePoints.nullable(), possiblePoints: scorePoints }).strict()).length(6),
   gates: z.array(z.object({ label: text(160), basis: text(200), authority: z.enum(["hypothetical", "source-reported", "pinned-balance", "source-reported-attribution"]) }).strict()).max(12),
@@ -42,6 +45,7 @@ export const assessmentContextSchema = z.object({
     || assessment.scoreRange.minimum > assessment.scoreRange.maximum
     || Math.abs(assessment.weights.avoid + assessment.weights.caution + assessment.weights.ok - 1) > 1e-8) context.addIssue({ code: "custom", message: "Inconsistent deterministic assessment metadata." });
 });
+export const assessmentContextSchema = z.union([localAssessmentContextSchema, swarmAssessmentContextSchema]);
 export const sourceContextSchema = z.object({
   security: z.object({ source: z.literal("GoPlus"), status: sourceStatus, checkedAt: z.iso.datetime(), holderCount: count.nullable(), checks: z.array(z.object({ id: z.enum(TOKEN_SECURITY_CHECKS), value: z.enum(["yes", "no", "unknown"]) }).strict()).max(TOKEN_SECURITY_CHECKS.length) }).strict().optional(),
   balances: z.object({ source: z.literal("Base RPC"), blockNumber: z.string().regex(/^(0|[1-9][0-9]*)$/).max(30), blockTimestamp: count, verifiedCandidates: count, requestedCandidates: count, status, discoveryProvider: z.enum(["GoPlus", "Blockscout"]), discoveryStatus: status, finalizedCensus: z.literal(false) }).strict().optional(),
@@ -52,6 +56,7 @@ export const sourceContextSchema = z.object({
   }).strict().optional(),
   market: z.object({ source: z.literal("DEXScreener"), status: sourceStatus, checkedAt: z.iso.datetime(), priceUsd: z.string().regex(/^(?:0|[1-9][0-9]{0,35})(?:\.[0-9]{1,60})?$/).max(100).nullable(), liquidityUsd: z.number().finite().min(0).max(1e18).nullable(), marketCapUsd: z.number().finite().min(0).max(1e18).nullable(), volume24hUsd: z.number().finite().min(0).max(1e18).nullable() }).strict().optional(),
   assessment: assessmentContextSchema.optional(),
+  swarmAssessment: swarmAssessmentContextSchema.optional(),
 }).strict().superRefine((value, context) => {
   const security = value.security, balances = value.balances, market = value.market, table = value.walletTable;
   if ((security && (new Set(security.checks.map((check) => check.id)).size !== security.checks.length || (security.status !== "reported" && (security.holderCount !== null || security.checks.length))))
@@ -94,10 +99,10 @@ function reportSourceContext(report: InvestigationReport): ReportSourceContext |
 }
 
 /** Optional signed chat-only rule context; never competes with complete finding proofs. */
-export function createAssessmentSourceContext(report: InvestigationReport): NonNullable<ReportSourceContext["assessment"]> {
+export function createAssessmentSourceContext(report: InvestigationReport): z.infer<typeof localAssessmentContextSchema> {
   const assessment = assessInvestigationReport(report);
-  return assessmentContextSchema.parse({ model: "traceforce-judge-1.0.0", ruleVersion: assessment.version, earnedScore: assessment.assessedPoints, displayedScore: assessment.displayedScore, scoreRange: assessment.scoreRange,
-    verdict: assessment.verdict, assessedPossiblePoints: assessment.assessedPossiblePoints, possiblePoints: assessment.possiblePoints,
+  return localAssessmentContextSchema.parse({ model: "traceforce-judge-1.0.0", ruleVersion: assessment.version, earnedScore: assessment.assessedPoints, displayedScore: assessment.displayedScore, scoreRange: assessment.scoreRange,
+    verdict: assessment.verdict, assessedPossiblePoints: assessment.assessedPossiblePoints, possiblePoints: assessment.possiblePoints, complete: assessment.complete, missingChecks: assessment.missingChecks,
     weights: assessment.verdictWeights, categories: assessment.categories.map(({ id, points, possiblePoints }) => ({ id, points, possiblePoints })),
     rawStats: { largestSharePercent: assessment.metrics.largestSharePercent, topTenSharePercent: assessment.metrics.topTenSharePercent,
       creatorSharePercent: assessment.metrics.creatorSharePercent, dumpImpactPercent: assessment.metrics.dumpImpactPercent,
@@ -128,8 +133,20 @@ type Finding = z.infer<typeof findingSchema>;
 const categories = ["selling", "funding", "accumulation", "connections"] as const;
 type OmissionReason = "category_limit" | "evidence_limit" | "context_limit" | "citation_limit";
 
+/** Main review keeps every selected finding and proof fact. Redundant source
+ * metadata stays in full/signed chat context, outside the decision summary. */
+export function compactMainReviewJson(json: string): string {
+  const value = JSON.parse(json);
+  delete value.coverage.fundingDefinitions;
+  if (value.dossier.authority.walletTable) value.dossier.authority.walletTable = "Pinned EOA/contract classification and wallet Float; not a census or ownership proof. Contracts retain separate risk checks.";
+  delete value.sourceContext;
+  const decisionPacket = value.decisionPacket;
+  delete value.decisionPacket;
+  return JSON.stringify({ ...value, ...(decisionPacket === undefined ? {} : { decisionPacket }) });
+}
+
 /** Whole findings and sale proofs are selected atomically; never truncate their support. */
-export function createInvestigatorContext(report: InvestigationReport, config: AiConfiguration) {
+export function createInvestigatorContext(report: InvestigationReport, config: AiConfiguration, options: { includeDecisionPacket?: boolean } = {}) {
   try { validateCreationAnnotations(report); } catch { throw new InvestigatorContextError("INVALID_CONTEXT"); }
   if (!Array.isArray(report?.coverage?.warnings) || !Array.isArray(report?.coverage?.funding) || !Array.isArray(report?.findings)) throw new InvestigatorContextError("INVALID_CONTEXT");
   const warningList = report.coverage.warnings;
@@ -143,6 +160,7 @@ export function createInvestigatorContext(report: InvestigationReport, config: A
   if (!parsedBase.success || !parsedEvidence.success || !parsedFindings.success) throw new InvestigatorContextError("INVALID_CONTEXT");
   const base = parsedBase.data, evidence = parsedEvidence.data, findings = parsedFindings.data;
   const sourceContext = reportSourceContext(report);
+  const decisionPacket = buildPlainLanguagePacket(report, { profileVersion: ON_CHAIN_INVESTIGATOR.version });
   let crawl: InvestigationReport["coverage"]["transferCrawl"];
   try { if (report.coverage.transferCrawl) crawl = validateTransferCrawl(report.coverage.transferCrawl, report.range, report.coverage.transfers); }
   catch { throw new InvestigatorContextError("INVALID_CONTEXT"); }
@@ -245,11 +263,11 @@ export function createInvestigatorContext(report: InvestigationReport, config: A
     const findingSelection = { supplied: supplied.length, omitted, byCategory, omissionReasons };
     const json = JSON.stringify({ network: "Base (8453)", investigatedAsset: "ERC-20 token, not native ETH", range: { blocks: [base.range.from.number, base.range.to.number], times: [base.range.from.timestamp, base.range.to.timestamp], finality: "finalized" },
       coverage: { transfers: base.coverage.transfers, eligibleWallets: base.coverage.eligibleWallets, examinedWallets: base.coverage.examinedWallets, fundingStatusCounts: fundingCounts, fundingDefinitions: { complete: "Declared bounded funding search completed; not a positive event count or complete lifetime history.", partial: "Declared funding search was incomplete.", unavailable: "Funding search could not be retrieved.", not_examined: "Funding search was not checked." }, omittedWarnings: base.coverage.omittedWarnings },
-      coverageStatements: [...limitationStatements].map(([id, text]) => ({ id, text })), selection, findingSelection, dossier, findingPackets: packets, sourceFacts, ...(sourceContext ? { sourceContext } : {}),
+      ...(options.includeDecisionPacket === false ? {} : { decisionPacket: plainLanguageDecisionContext(decisionPacket) }), coverageStatements: [...limitationStatements].map(([id, text]) => ({ id, text })), selection, findingSelection, dossier, findingPackets: packets, sourceFacts, ...(sourceContext ? { sourceContext } : {}),
     });
     const roleAddresses = new Map([...roles].map(([address, label]) => [label, address]));
     if (records.some((record) => record.from === `0x${"0".repeat(40)}` || record.to === `0x${"0".repeat(40)}`)) roleAddresses.set("ZERO_ADDRESS", `0x${"0".repeat(40)}`);
-    return { context: { reportId: base.reportId, evidence: records, selection }, json, aliases, packets, findingRefs, roleAddresses, limitationStatements, coverageSentence: `${transferStatement} ${fundingStatement}`, findingSelection };
+    return { context: { reportId: base.reportId, evidence: records, selection, decisionPacket }, json, aliases, packets, findingRefs, roleAddresses, limitationStatements, coverageSentence: `${transferStatement} ${fundingStatement}`, findingSelection };
   };
 
   // A locally cheapest first packet can consume evidence needed by another

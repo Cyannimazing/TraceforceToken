@@ -25,7 +25,7 @@ export async function readInvestigationAnswer(response: Response, evidenceIds: R
     body += decoder.decode();
     let value: unknown; try { value = JSON.parse(body); } catch { throw new InvestigationQuestionError(); }
     if (!response.ok) {
-      const error = z.object({ error: text(240) }).strict().safeParse(value);
+      const error = z.object({ error: text(240), code: z.enum(["AI_UNAVAILABLE", "AI_RATE_LIMITED", "AI_RESPONSE_UNVERIFIED"]).optional() }).strict().safeParse(value);
       throw new InvestigationQuestionError(error.success ? error.data.error : "Questions are temporarily unavailable. Please try again.");
     }
     if (response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json") throw new InvestigationQuestionError();

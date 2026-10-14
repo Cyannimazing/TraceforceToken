@@ -1,8 +1,9 @@
-import { z } from "zod";
+import { z } from "@/lib/validation";
 import type { Address, ExplainedInvestigationReport, InvestigationReport } from "./types";
 import { DEFAULT_LOOKBACK_BLOCKS } from "./scan-defaults";
 
 export const scanParametersSchema = z.object({
+  chain: z.literal("base").optional(),
   token: z.string().regex(/^0x[0-9a-fA-F]{40}$/).transform((value) => value.toLowerCase() as Address),
   lookbackBlocks: z.number().int().min(100).max(20_000).default(DEFAULT_LOOKBACK_BLOCKS),
   scope: z.enum(["full", "window"]).default("full"),
@@ -12,7 +13,9 @@ export type ScanEvent =
   | { type: "progress"; stage: string }
   | { type: "analysis"; report: InvestigationReport }
   | { type: "report"; report: ExplainedInvestigationReport; chatContext?: string }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string; code?: "AI_RATE_LIMITED" };
+
+export const AI_RATE_LIMIT_SCAN_MESSAGE = "The AI service has reached its request limit. Your evidence is ready; try again after the limit resets.";
 
 export const MAX_SCAN_REPORT_BYTES = 8 * 1024 * 1024;
 export const MAX_SCAN_STREAM_BYTES = 16 * 1024 * 1024;

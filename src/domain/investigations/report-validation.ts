@@ -9,6 +9,9 @@ import { tokenSecuritySnapshotSchema } from "./token-security";
 import { creationAnnotationSchema, validateCreationAnnotations } from "./creator-attribution";
 import { transferCrawlSchema, validateTransferCrawl } from "./transfer-crawl";
 import { creatorFundingCoverageSchema, validateCreatorFundingCoverage } from "./creator-funding";
+import { swarmAssessmentSnapshotSchema, validateSwarmAssessmentSnapshot } from "./swarm-assessment";
+import { providerEnrichmentBundleSchema, validateProviderEnrichmentBundle } from "./provider-enrichment";
+import { exitQuoteSchema, validateExitQuote } from "./exit-quote";
 
 export const MAX_INVESTIGATION_REPORT_BYTES = 8 * 1024 * 1024;
 
@@ -31,6 +34,10 @@ const reportSchema: z.ZodType<InvestigationReport> = z.object({
   id: z.uuid(),
   generatedAt: z.iso.datetime(),
   mode: z.literal("live"),
+  assessmentAuthority: z.enum(["swarm", "traceforge"]).optional(),
+  swarmAvailability: z.object({ status: z.literal("unavailable"), reason: z.enum(["timeout", "rate_limited", "access_denied", "stale_result", "invalid_response", "identity_mismatch", "job_failed", "unavailable"]), checkedAt: z.iso.datetime() }).strict().optional(),
+  swarmAssessment: swarmAssessmentSnapshotSchema.optional(),
+  providerEnrichment: providerEnrichmentBundleSchema.optional(),
   token: z.object({
     address: address.transform((value) => value as ScanParameters["token"]),
     chainId: z.literal(8453),
@@ -77,6 +84,7 @@ const reportSchema: z.ZodType<InvestigationReport> = z.object({
   holderSnapshot: holderSnapshotSchema.optional(),
   walletActivitySnapshot: walletActivitySnapshotSchema.optional(),
   liquiditySnapshot: liquiditySnapshotSchema.optional(),
+  exitQuote: exitQuoteSchema.optional(),
   infrastructure: z.object({ pools: z.array(address).max(2000), hubs: z.array(address).max(2000) }).strict().optional(),
   wallets: z.array(z.object({
     address,
@@ -124,11 +132,15 @@ function parseReport(value: unknown): InvestigationReport {
   const serialized = JSON.stringify(value);
   if (typeof serialized !== "string" || new TextEncoder().encode(serialized).byteLength > MAX_INVESTIGATION_REPORT_BYTES) throw new Error();
   const report = reportSchema.parse(value);
+  if (report.swarmAssessment && report.swarmAvailability) throw new Error();
+  if (report.swarmAssessment) report.swarmAssessment = validateSwarmAssessmentSnapshot(report.swarmAssessment, report.token.address);
+  if (report.providerEnrichment) report.providerEnrichment = validateProviderEnrichmentBundle(report.providerEnrichment, report.token.address);
   if (report.coverage.transferCrawl) validateTransferCrawl(report.coverage.transferCrawl, report.range, report.coverage.transfers);
   if (report.holderSnapshot) report.holderSnapshot = validateHolderSnapshot(report.holderSnapshot, report.token, report.range.to);
   if (report.walletActivitySnapshot) report.walletActivitySnapshot = validateWalletActivitySnapshot(report.walletActivitySnapshot, report.range.to);
   if (report.liquiditySnapshot) report.liquiditySnapshot = validateLiquiditySnapshot(report.liquiditySnapshot, report.token.address, report.range.to);
   if (report.infrastructure) for (const addresses of [report.infrastructure.pools, report.infrastructure.hubs]) if (new Set(addresses).size !== addresses.length || addresses.includes(`0x${"0".repeat(40)}`)) throw new Error();
+  if (report.exitQuote) report.exitQuote = validateExitQuote(report.exitQuote, report.token, report.range.to, report.holderSnapshot, report.walletActivitySnapshot, report.infrastructure?.pools ?? []);
   validateMarketAnnotations(report.evidence, report.token.address);
   validateCreationAnnotations(report);
   if (report.coverage.creatorFunding) report.coverage.creatorFunding = validateCreatorFundingCoverage(report.coverage.creatorFunding, report);

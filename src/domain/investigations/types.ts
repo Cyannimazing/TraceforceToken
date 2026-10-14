@@ -1,3 +1,9 @@
+import type { SwarmAssessmentSnapshot } from "./swarm-assessment";
+import type { PlainLanguageSummary } from "./plain-language-summary";
+import type { InvestigationNetwork } from "./networks";
+import type { ProviderEnrichmentBundle } from "./provider-enrichment";
+import type { ExitQuoteSnapshot } from "./exit-quote";
+
 export type Address = `0x${string}`;
 export type Hash = `0x${string}`;
 export type CoverageStatus = "complete" | "partial" | "unavailable" | "not_examined";
@@ -146,7 +152,7 @@ export interface HolderSnapshot {
     address: Address;
     balanceRaw: string | null;
     status: "verified" | "unavailable" | "not_examined";
-    discoveredBy: "indexed" | "observed" | "both";
+    discoveredBy: "indexed" | "observed" | "both" | "external";
   }[];
   provenance: {
     provider: "Base RPC";
@@ -174,6 +180,7 @@ export interface InvestigationDataset {
   holderSnapshot?: HolderSnapshot;
   walletActivitySnapshot?: WalletActivitySnapshot;
   liquiditySnapshot?: LiquiditySnapshot;
+  exitQuote?: ExitQuoteSnapshot;
   coverage: {
     transfers: CoverageStatus;
     /** Requested acquisition scope and fully processed discovery ranges, not proof of index completeness. */
@@ -207,7 +214,7 @@ export interface InvestigationExplanation {
   schemaVersion: 1;
   reportId: string;
   profileId: "on-chain-investigator";
-  profileVersion: "1.0.0" | "1.1.0" | "1.1.1" | "1.1.2" | "1.2.0" | "1.3.0" | "1.4.0";
+  profileVersion: "1.0.0" | "1.1.0" | "1.1.1" | "1.1.2" | "1.2.0" | "1.3.0" | "1.4.0" | "1.5.0" | "1.6.0";
   model: string;
   generatedAt: string;
   overview: { text: string; evidenceIds: string[] };
@@ -220,6 +227,8 @@ export interface InvestigationExplanation {
   limitations: string[];
   context: { evidenceIds: string[]; suppliedEvidence: number; omittedEvidence: number };
   authority: "non-authoritative-commentary";
+  /** Profile 1.5: model-selected reasons restored from the supplied assessment. */
+  summary?: PlainLanguageSummary;
   /** In 1.4.0 the model selects facts; published prose is restored from these exact sources. */
   grounding?: {
     mode: "canonical-finding-selection";
@@ -234,12 +243,20 @@ export interface InvestigationReport {
   id: string;
   generatedAt: string;
   mode: "live";
+  /** Explicit main-report source; absent preserves legacy local assessments. */
+  assessmentAuthority?: "swarm" | "traceforge";
+  swarmAvailability?: { status: "unavailable"; reason: "timeout" | "rate_limited" | "access_denied" | "stale_result" | "invalid_response" | "identity_mismatch" | "job_failed" | "unavailable"; checkedAt: string };
   token: TokenDetails;
+  /** Separately timed third-party assessment; never pinned chain evidence. */
+  swarmAssessment?: SwarmAssessmentSnapshot;
+  providerEnrichment?: ProviderEnrichmentBundle;
   range: InvestigationDataset["range"];
   coverage: InvestigationDataset["coverage"];
   holderSnapshot?: HolderSnapshot;
   walletActivitySnapshot?: WalletActivitySnapshot;
   liquiditySnapshot?: LiquiditySnapshot;
+  /** Fee-aware selected-pool simulation, distinct from an executed sale. */
+  exitQuote?: ExitQuoteSnapshot;
   infrastructure?: { pools: Address[]; hubs: Address[] };
   summary: string;
   wallets: {
@@ -266,6 +283,7 @@ export interface ExplainedInvestigationReport extends InvestigationReport {
 }
 
 export interface ScanParameters {
+  chain?: InvestigationNetwork;
   token: Address;
   lookbackBlocks: number;
   /** Public requests default to full; absent only in legacy direct collector callers. */

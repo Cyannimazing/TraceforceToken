@@ -16,7 +16,7 @@ test("Alchemy transfer discovery pins the token/range, includes zero transfers a
   assert.deepEqual(first, { items: [{ hash, blockNumber: "99" }], nextCursor: "opaque-page-1" });
   assert.deepEqual(calls, [{ method: "alchemy_getAssetTransfers", params: [{
     fromBlock: "0x0", toBlock: "0x64", contractAddresses: [token], category: ["erc20"], order: "asc",
-    excludeZeroValue: false, withMetadata: false, maxCount: "0x64",
+    excludeZeroValue: false, withMetadata: false, maxCount: "0x3e8",
   }] }]);
   await read({ ...query, cursor: first.nextCursor });
   assert.equal((calls[1].params[0] as unknown as { pageKey: string }).pageKey, "opaque-page-1");
@@ -41,11 +41,19 @@ test("Alchemy discovery rejects token/category/range/order/identity and cursor i
     { transfers: [{ ...item, hash: "invalid" }] },
     { transfers: [{ ...item, blockNum: "0x01" }] },
     { transfers: [item], pageKey: "bad\ncursor" },
-    { transfers: Array(101).fill(item) },
+    { transfers: Array(1001).fill(item) },
     { transfers: null },
   ];
   for (const page of invalidPages) await assert.rejects(createAlchemyTransferPageReader(async () => page)(query), ProviderIntegrityError);
   await assert.rejects(createAlchemyTransferPageReader(async () => ({ transfers: [item] }))({ ...query, fromBlock: "100" }), ProviderIntegrityError);
+});
+
+test("Alchemy transfer discovery accepts a full thousand-row page without trusting indexed amounts", async () => {
+  const transfers = Array.from({ length: 1000 }, (_, index) => ({ ...item, hash: `0x${index.toString(16).padStart(64, "0")}` }));
+  const page = await createAlchemyTransferPageReader(async () => ({ transfers, pageKey: "next-page" }))(query);
+  assert.equal(page.items.length, 1000);
+  assert.equal(page.nextCursor, "next-page");
+  assert.ok(page.items.every((row) => Object.keys(row).sort().join(",") === "blockNumber,hash"));
 });
 
 test("Alchemy discovery keeps provider failures unchanged and rejects invalid queries before I/O", async () => {

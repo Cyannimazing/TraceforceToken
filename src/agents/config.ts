@@ -72,15 +72,43 @@ export interface GeminiAiConfiguration extends Omit<LocalAiConfiguration, "model
   model: typeof GEMINI_MODELS[number];
   apiKey: string;
 }
-export type AiConfiguration = LocalAiConfiguration | GeminiAiConfiguration;
-export interface InvestigatorAiConfiguration { local?: LocalAiConfiguration; gemini?: GeminiAiConfiguration }
+export const OPENROUTER_ORIGIN = "https://openrouter.ai";
+export const DEFAULT_OPENROUTER_MODEL = "openrouter/free";
+export interface OpenRouterAiConfiguration extends Omit<LocalAiConfiguration, "model" | "baseUrl"> {
+  provider: "openrouter";
+  baseUrl: typeof OPENROUTER_ORIGIN;
+  model: string;
+  apiKey: string;
+  freeOnly: boolean;
+  allowDataCollection: boolean;
+}
+export type AiConfiguration = LocalAiConfiguration | GeminiAiConfiguration | OpenRouterAiConfiguration;
+export interface InvestigatorAiConfiguration { local?: LocalAiConfiguration; openrouter?: OpenRouterAiConfiguration; gemini?: GeminiAiConfiguration }
 const geminiSchema = configurationSchema.omit({ baseUrl: true, model: true }).extend({
   provider: z.literal("gemini"), baseUrl: z.literal(GEMINI_ORIGIN), model: z.enum(GEMINI_MODELS),
   apiKey: z.string().min(16).max(512).regex(/^[A-Za-z0-9_-]+$/),
 }).strict();
+const openRouterSchema = configurationSchema.omit({ baseUrl: true, model: true }).extend({
+  provider: z.literal("openrouter"), baseUrl: z.literal(OPENROUTER_ORIGIN),
+  // Trusted operator configuration only. Preserve the complete provider/model ID
+  // inside the existing 128-character report/capsule identity bound.
+  model: z.string().min(3).max(117).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(?::free)?$/)
+    .refine((value) => !value.includes("..") && (value === "openrouter/free" || !value.toLowerCase().startsWith("openrouter/"))),
+  apiKey: z.string().min(16).max(512).regex(/^[A-Za-z0-9_-]+$/),
+  freeOnly: z.boolean().default(true),
+  allowDataCollection: z.boolean().default(false),
+}).strict().superRefine((value, context) => {
+  if (value.freeOnly && value.model !== "openrouter/free" && !value.model.endsWith(":free"))
+    context.addIssue({ code: "custom", path: ["model"], message: "Free-only inference requires the free router or a free model variant." });
+});
 
 export function validateAiConfiguration(value: unknown): AiConfiguration {
   if (typeof value === "object" && value !== null && "provider" in value) {
+    if (value.provider === "openrouter") {
+      const result = openRouterSchema.safeParse(value);
+      if (!result.success) throw new Error("OpenRouter AI configuration contains an invalid setting or budget.");
+      return result.data;
+    }
     const result = geminiSchema.safeParse(value);
     if (!result.success) throw new Error("Gemini AI configuration contains an invalid setting or budget.");
     return result.data;
@@ -88,21 +116,44 @@ export function validateAiConfiguration(value: unknown): AiConfiguration {
   return validateLocalAiConfiguration(value);
 }
 export function aiModelIdentifier(config: AiConfiguration): string {
-  return "provider" in config ? `gemini/${config.model}` : config.model;
+  return "provider" in config ? `${config.provider}/${config.model}` : config.model;
+}
+/** A router is the request scope; completed inference records the served model. */
+export function aiModelMatchesConfiguration(config: AiConfiguration, identifier: string): boolean {
+  if (!("provider" in config) || config.provider !== "openrouter" || config.model !== "openrouter/free") return identifier === aiModelIdentifier(config);
+  if (!identifier.startsWith("openrouter/")) return false;
+  const served = identifier.slice("openrouter/".length);
+  if (served.length > 117 || served.includes("..") || !/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*(?::free)?$/.test(served)) return false;
+  const base = served.toLowerCase().replace(/:free$/, "");
+  return !["openrouter/free", "openrouter/auto", "openrouter/auto-beta", "openrouter/auto-exacto", "openrouter/fusion", "openrouter/bodybuilder", "openrouter/body-builder", "openrouter/pareto-code-router"].includes(base);
 }
 export function readInvestigatorAiConfiguration(env: Record<string, string | undefined> = process.env): InvestigatorAiConfiguration {
-  if (env.NEXT_PUBLIC_GEMINI_API_KEY?.trim()) throw new Error("Inference credentials must remain server-only.");
+  if (env.NEXT_PUBLIC_GEMINI_API_KEY?.trim() || env.NEXT_PUBLIC_OPENROUTER_API_KEY?.trim()) throw new Error("Inference credentials must remain server-only.");
   if (env.VERCEL === "1") throw new Error("Configure inference credentials on the protected engine, not Vercel.");
-  const local = env.LOCAL_AI_MODEL?.trim() ? readLocalAiConfiguration(env) : undefined;
+  const selected = env.INVESTIGATOR_AI_PROVIDER?.trim() || "auto";
+  if (!["auto", "local", "openrouter", "gemini"].includes(selected)) throw new Error("INVESTIGATOR_AI_PROVIDER must be auto, local, openrouter or gemini.");
+  const local = (selected === "auto" || selected === "local") && env.LOCAL_AI_MODEL?.trim() ? readLocalAiConfiguration(env) : undefined;
+  let openrouter: OpenRouterAiConfiguration | undefined;
   let gemini: GeminiAiConfiguration | undefined;
-  if (env.GEMINI_API_KEY?.trim()) {
+  const cloudBudgets = () => readLocalAiConfiguration({ ...env, LOCAL_AI_MODEL: "traceforce-investigator", LOCAL_AI_BASE_URL: "http://127.0.0.1:11434" });
+  if ((selected === "auto" || selected === "openrouter") && env.OPENROUTER_API_KEY?.trim()) {
+    const freeOnly = env.OPENROUTER_FREE_ONLY?.trim() || "true";
+    if (freeOnly !== "true" && freeOnly !== "false") throw new Error("OPENROUTER_FREE_ONLY must be true or false.");
+    const allowDataCollection = env.OPENROUTER_ALLOW_DATA_COLLECTION?.trim() || "false";
+    if (allowDataCollection !== "true" && allowDataCollection !== "false") throw new Error("OPENROUTER_ALLOW_DATA_COLLECTION must be true or false.");
+    const validated = validateAiConfiguration({ ...cloudBudgets(), provider: "openrouter", baseUrl: OPENROUTER_ORIGIN,
+      model: env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_MODEL, apiKey: env.OPENROUTER_API_KEY.trim(),
+      freeOnly: freeOnly === "true", allowDataCollection: allowDataCollection === "true" });
+    if (!("provider" in validated) || validated.provider !== "openrouter") throw new Error("Invalid OpenRouter configuration.");
+    openrouter = validated;
+  }
+  if ((selected === "gemini" || selected === "auto" && !openrouter?.freeOnly) && env.GEMINI_API_KEY?.trim()) {
     // Shared conservative budgets do not require configuring a local model.
-    const budgets = readLocalAiConfiguration({ ...env, LOCAL_AI_MODEL: "traceforce-investigator", LOCAL_AI_BASE_URL: "http://127.0.0.1:11434" });
-    const validated = validateAiConfiguration({ ...budgets, provider: "gemini", baseUrl: GEMINI_ORIGIN,
+    const validated = validateAiConfiguration({ ...cloudBudgets(), provider: "gemini", baseUrl: GEMINI_ORIGIN,
       model: env.GEMINI_MODEL?.trim() || GEMINI_MODELS[0], apiKey: env.GEMINI_API_KEY.trim() });
-    if (!("provider" in validated)) throw new Error("Invalid Gemini configuration.");
+    if (!("provider" in validated) || validated.provider !== "gemini") throw new Error("Invalid Gemini configuration.");
     gemini = validated;
   }
-  if (!local && !gemini) throw new Error("Configure LOCAL_AI_MODEL or a server-only GEMINI_API_KEY for investigator review.");
-  return { local, gemini };
+  if (!local && !openrouter && !gemini) throw new Error("Configure the selected investigator AI provider with LOCAL_AI_MODEL, OPENROUTER_API_KEY or GEMINI_API_KEY.");
+  return { local, openrouter, gemini };
 }

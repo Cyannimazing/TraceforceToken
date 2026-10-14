@@ -20,7 +20,7 @@ Combined hard memory ceilings are about **6.57 GB**, leaving about **1.43 GB** o
 
 For MySQL, engine and Ollama on **one** VPS, use the separate [cohosting profile](cohost/README.md), which reduces Ollama's ceiling and budgets all three services. Its explicit TLS/network/grant steps remain unverified operator preparation. Do not add MySQL to this engine-only budget unchanged.
 
-Use **qwen3:4b-instruct-2507-q4_K_M**, named **traceforce-investigator**, committed profile **1.3.0**, at most **12 context evidence records**, **two CPU threads**, and zero GPU layers. Custom instructions are not fine-tuned weights or an accuracy guarantee. [Official model listing](https://ollama.com/library/qwen3:4b-instruct-2507-q4_K_M)
+Use **qwen3:4b-instruct-2507-q4_K_M**, named **traceforce-investigator**, committed profile **1.5.0**, at most **12 context evidence records**, **two CPU threads**, and zero GPU layers. Custom instructions are not fine-tuned weights or an accuracy guarantee. [Official model listing](https://ollama.com/library/qwen3:4b-instruct-2507-q4_K_M)
 
 ## Prepare a reviewed release
 
@@ -57,6 +57,12 @@ This performs no network, model inference, SQL or DDL. It prints static pass/fai
 
 ## Model and engine services
 
+`OPENROUTER_ALLOW_DATA_COLLECTION` defaults to `false`. Set it to `true` only for operator-approved provider data use, then restart the engine; providers may retain/use prompts and responses, including training, under their policies. This changes only OpenRouter routing. The account's separate Free model training preference may still be required and is not configured by this flag. Strict schema, evidence guards, zero-price filters and no paid fallback remain enabled. See [the data-use boundary](../../docs/local-ai.md#provider-selection-and-openrouter-setup).
+
+For free OpenRouter, put `INVESTIGATOR_AI_PROVIDER=openrouter`, a private `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free` and `OPENROUTER_FREE_ONLY=true` in the protected engine environment, then restart. A Gemini key is not required. The free router or a specific `namespace/model:free` is accepted; zero-price request filters and no paid cloud fallback preserve this policy. In `auto`, configured local inference may run first, but Gemini is excluded while free-only OpenRouter is active. Paid OpenRouter requires explicit `OPENROUTER_FREE_ONLY=false`; direct Gemini is separate opt-in. A genuine pinned NVIDIA free-model trial passed synthetic canonical review and greeting/cited funding chat with zero recorded API cost; [setup, privacy override and exact verification limits](../../docs/local-ai.md#provider-selection-and-openrouter-setup). This workstation trial does not install or verify the Linux/VPS deployment.
+
+These service templates remain the prepared **local/Ollama layout**: the worker still wants and starts after `traceforce-ollama.service`, and the resource ceilings below budget local inference. Runtime provider selection does not remove those dependencies. Review the service layout, resource allocation and outbound HTTPS policy separately before a cloud-only deployment; no such deployment is installed or verified here.
+
 Review both units. Stop/disable a conflicting installer-created Ollama service. Explicitly install/validate:
 
 ```bash
@@ -81,7 +87,7 @@ sudo systemctl start traceforce-worker.service
 curl --fail --max-time 5 http://127.0.0.1:8787/health
 ```
 
-Confirm actual profile 1.3.0. GET /health is liveness only. POST exactly /scan requires Authorization: Bearer <secret>, JSON and at most 2,048 body bytes. POST exactly /ask uses the same secret, up to 48 KiB JSON, question at most 1,000 characters and signed context at most 32 KiB. Startup validates provider/AI configuration. No cookies, CORS or forwarded-client-IP interpretation is provided.
+Confirm actual profile 1.5.0. GET /health is liveness only. POST exactly /scan requires Authorization: Bearer <secret>, JSON and at most 2,048 body bytes. POST exactly /ask uses the same secret, up to 48 KiB JSON, question at most 1,000 characters and signed context at most 32 KiB. Startup validates provider/AI configuration. No cookies, CORS or forwarded-client-IP interpretation is provided.
 
 The signed question context expires after 30 minutes and remains in browser memory. It is not encrypted or server report storage. Questions explain that bounded snapshot; newer or omitted evidence requires a fresh scan. Reload discards the report/context.
 

@@ -1,6 +1,7 @@
 import { z } from "@/lib/validation";
 import type { InvestigationExplanation, InvestigationReport } from "./types";
 import { canonicalExplanationOverview, canonicalFindingCaveat, canonicalFindingClaim } from "./explanation-grounding";
+import { plainLanguageSummarySchema, validatePlainLanguageSummary } from "./plain-language-summary";
 
 export class ExplanationValidationError extends Error {
   constructor(public readonly code: "INVALID_EXPLANATION" | "INVALID_CITATION") { super(`Investigation explanation validation failed (${code}).`); this.name = "ExplanationValidationError"; }
@@ -15,7 +16,8 @@ export const explanationDraftSchema = z.object({
 }).strict();
 const explanationSchema = explanationDraftSchema.extend({
   limitations: z.array(prose(500)).max(20),
-  schemaVersion: z.literal(1), reportId: text(255), profileId: z.literal("on-chain-investigator"), profileVersion: z.enum(["1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.2.0", "1.3.0", "1.4.0"]),
+  schemaVersion: z.literal(1), reportId: text(255), profileId: z.literal("on-chain-investigator"), profileVersion: z.enum(["1.0.0", "1.1.0", "1.1.1", "1.1.2", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0"]),
+  summary: plainLanguageSummarySchema.optional(),
   model: text(128), generatedAt: z.iso.datetime(), authority: z.literal("non-authoritative-commentary"),
   context: z.object({ evidenceIds: z.array(text(255)).max(200), suppliedEvidence: z.number().int().min(0).max(200), omittedEvidence: z.number().int().nonnegative().safe() }).strict(),
   grounding: z.object({ mode: z.literal("canonical-finding-selection"), overviewFindingIds: z.array(text(255)).max(2), overviewEvidenceIds: z.array(text(255)).max(2), observations: z.array(z.object({ findingId: text(255), caveatIndex: z.number().int().min(0).max(9) }).strict()).max(4) }).strict().optional(),
@@ -26,6 +28,10 @@ export function validateInvestigationExplanation(report: InvestigationReport, va
   const result = explanationSchema.safeParse(value);
   if (!result.success || result.data.reportId !== report.id) throw new ExplanationValidationError("INVALID_EXPLANATION");
   const explanation = result.data;
+  if (explanation.profileVersion === "1.5.0" || explanation.profileVersion === "1.6.0") {
+    try { explanation.summary = validatePlainLanguageSummary(report, explanation.summary, { profileVersion: explanation.profileVersion }); }
+    catch { throw new ExplanationValidationError("INVALID_EXPLANATION"); }
+  } else if (explanation.summary) throw new ExplanationValidationError("INVALID_EXPLANATION");
   const retained = new Map(report.evidence.map((record) => [record.id, record]));
   const context = new Set(explanation.context.evidenceIds);
   if (context.size !== explanation.context.evidenceIds.length || context.size !== explanation.context.suppliedEvidence || explanation.context.omittedEvidence !== report.evidence.length - context.size || [...context].some((id) => !retained.has(id))) throw new ExplanationValidationError("INVALID_CITATION");
@@ -38,7 +44,7 @@ export function validateInvestigationExplanation(report: InvestigationReport, va
   };
   citations(explanation.overview.evidenceIds);
   if (report.evidence.length > 0 && explanation.overview.evidenceIds.length === 0) throw new ExplanationValidationError("INVALID_CITATION");
-  const proofBound = explanation.profileVersion === "1.3.0" || explanation.profileVersion === "1.4.0";
+  const proofBound = ["1.3.0", "1.4.0", "1.5.0", "1.6.0"].includes(explanation.profileVersion);
   if (proofBound) {
     if (explanation.observations.length > 4 || new Set(explanation.observations.map((observation) => observation.category)).size !== explanation.observations.length) throw new ExplanationValidationError("INVALID_CITATION");
     for (const id of explanation.overview.evidenceIds) if (retained.get(id)?.sale?.supportingEvidenceIds.some((support) => !explanation.overview.evidenceIds.includes(support))) throw new ExplanationValidationError("INVALID_CITATION");
@@ -52,7 +58,7 @@ export function validateInvestigationExplanation(report: InvestigationReport, va
     if (!validKind) throw new ExplanationValidationError("INVALID_CITATION");
     if (proofBound && records.some((record) => record.kind === "sale" && record.sale?.supportingEvidenceIds.some((id) => !observation.evidenceIds.includes(id)))) throw new ExplanationValidationError("INVALID_CITATION");
   }
-  if (explanation.profileVersion === "1.4.0") {
+  if (explanation.profileVersion === "1.4.0" || explanation.profileVersion === "1.5.0" || explanation.profileVersion === "1.6.0") {
     const grounding = explanation.grounding;
     if (!grounding || grounding.observations.length !== explanation.observations.length
       || new Set(grounding.observations.map((entry) => entry.findingId)).size !== grounding.observations.length

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AnalysisInputError, analyzeInvestigation, evidenceId } from "../../src/domain/investigations/analyze";
+import { AnalysisInputError, MAX_DETAILED_TRANSFER_FINDINGS, analyzeInvestigation, evidenceId } from "../../src/domain/investigations/analyze";
+import { MAX_INVESTIGATION_REPORT_BYTES, validateBaseInvestigationReport } from "../../src/domain/investigations/report-validation";
 import type { Address, EvidenceRecord, Hash, HolderSnapshot, InvestigationDataset } from "../../src/domain/investigations/types";
 
 const address = (value: number) => `0x${value.toString(16).padStart(40, "0")}` as Address;
@@ -42,6 +43,68 @@ const analyze = (input: InvestigationDataset) => analyzeInvestigation(input, OPT
 const findings = (input: InvestigationDataset, category: string) => analyze(input).findings.filter((item) => item.category === category);
 const initial = () => [transfer(110, 20, POOL, A), transfer(110, 21, POOL, B)];
 const linked = () => [...initial(), funding(90, 10, FUNDER, A), funding(95, 11, FUNDER, B)];
+
+test("ordinary transfer reports retain every direct finding and story until the narrative limit", () => {
+  const events = Array.from({ length: MAX_DETAILED_TRANSFER_FINDINGS }, (_, index) => transfer(101 + index, 1000 + index, A, B));
+  const source = dataset(events), report = analyze(source);
+  const detailed = report.findings.filter((finding) => finding.rule.name === "direct-token-transfer");
+  assert.equal(detailed.length, events.length);
+  assert.deepEqual(detailed.map((finding) => finding.evidenceIds[0]), events.map(evidenceId));
+  for (const finding of detailed) assert.ok(report.story.some((entry) => entry.id === `story:${finding.id}` && entry.evidenceIds[0] === finding.evidenceIds[0]));
+  assert.equal(report.coverage.warnings.some((warning) => warning.startsWith("Detailed summaries cover ")), false);
+});
+
+test("dense transfer reports fit the existing byte limit without losing evidence, candidates, graph edges or complete group proofs", () => {
+  const participants = Array.from({ length: 1998 }, (_, index) => address(1000 + index));
+  const observedAt = "2026-10-14T00:00:00.000Z";
+  const range = { from: { number: "0", hash: hash(0), timestamp: TIME }, to: { number: "2500", hash: hash(2500), timestamp: TIME + 5000 }, finality: "finalized" as const };
+  const events = Array.from({ length: 2000 }, (_, index) => transfer(index + 1, 10000 + index, participants[0], participants[1 + index % 1997], "1000000000000000000", {
+    transactionIndex: 0, timestamp: TIME + (index + 1) * 2,
+    provenance: { provider: "Synthetic stress fixture".padEnd(128, "x"), method: "fabricated test receipt".padEnd(128, "x"), observedAt },
+  }));
+  const source = dataset(events, {
+    range, pools: [], hubs: [],
+    coverage: { transfers: "partial", transferCrawl: { scope: "full", source: "alchemy-transfers", completedRanges: [] },
+      funding: participants.map((wallet) => ({ wallet, status: "not_examined", fromBlock: "0", toBlock: "2500", internalTransfers: "not_examined", reason: "Synthetic stress: funding not examined within the bounded budget." })),
+      eligibleWallets: participants.length, examinedWallets: 0, warnings: ["Synthetic stress data only."] },
+    holderSnapshot: { chainId: 8453, tokenAddress: TOKEN, block: range.to, totalSupplyRaw: MAX,
+      discovery: { provider: "Blockscout", sourceUrl: `https://base.blockscout.com/api/v2/tokens/${TOKEN}/holders`, observedAt, status: "unavailable", pages: 0, addresses: 0, finalizedCensus: false, reason: "Synthetic index unavailable." },
+      balances: { status: "partial", requestedWallets: participants.length, verifiedWallets: 459, reason: "Synthetic bounded balance coverage." },
+      holders: participants.map((wallet, index) => ({ address: wallet, balanceRaw: index < 459 ? "1" : null, status: index < 459 ? "verified" : "not_examined", discoveredBy: "observed" })),
+      provenance: { provider: "Base RPC", method: "eth_call balanceOf(address) at pinned finalized block", observedAt } },
+    walletActivitySnapshot: { block: range.to, rows: participants.map((wallet) => ({ address: wallet, outgoingTransactionCountRaw: null, code: "unavailable" })) },
+  });
+  const original = structuredClone(source);
+  const options = { id: "11111111-1111-4111-8111-111111111111", generatedAt: observedAt };
+  const report = analyzeInvestigation(source, options);
+  assert.ok(Buffer.byteLength(JSON.stringify(report), "utf8") < MAX_INVESTIGATION_REPORT_BYTES);
+  assert.doesNotThrow(() => validateBaseInvestigationReport(report));
+  assert.deepEqual(source, original);
+  assert.equal(report.evidence.length, events.length);
+  assert.deepEqual(report.evidence.map((event) => event.id), events.map(evidenceId));
+  assert.equal(report.connections.length, events.length);
+  assert.deepEqual(report.connections.map((connection) => connection.evidenceIds[0]), report.evidence.map((event) => event.id));
+  assert.deepEqual(report.wallets.map((wallet) => wallet.address), participants);
+  assert.deepEqual(report.holderSnapshot, source.holderSnapshot);
+  assert.deepEqual(report.walletActivitySnapshot, source.walletActivitySnapshot);
+  assert.deepEqual(report.coverage.funding, source.coverage.funding);
+  assert.equal(report.coverage.transfers, "partial"); assert.equal(report.coverage.examinedWallets, 0);
+  assert.equal(report.groups.length, 1); assert.deepEqual(report.groups[0].wallets, participants);
+  const completeProof = new Set(report.evidence.map((event) => event.id));
+  assert.deepEqual(new Set(report.groups[0].evidenceIds), completeProof);
+  assert.deepEqual(new Set(report.findings.find((finding) => finding.id === "connections:group:1")!.evidenceIds), completeProof);
+  assert.deepEqual(new Set(report.story.find((entry) => entry.id === "story:connections:group:1")!.evidenceIds), completeProof);
+  const detailed = report.findings.filter((finding) => finding.rule.name === "direct-token-transfer");
+  assert.equal(detailed.length, MAX_DETAILED_TRANSFER_FINDINGS);
+  assert.deepEqual(detailed.map((finding) => finding.evidenceIds[0]), report.evidence.slice(0, MAX_DETAILED_TRANSFER_FINDINGS).map((event) => event.id));
+  assert.equal(report.story.filter((entry) => entry.id.startsWith("story:transfer:")).length, MAX_DETAILED_TRANSFER_FINDINGS);
+  const disclosure = `Detailed summaries cover ${MAX_DETAILED_TRANSFER_FINDINGS} of ${events.length} qualifying token transfers; ${events.length - MAX_DETAILED_TRANSFER_FINDINGS} transfers have no individual finding or timeline summary. All evidence, connections and group proofs are retained.`;
+  assert.ok(report.coverage.warnings.includes(disclosure));
+  assert.ok(report.coverage.warnings.includes("Synthetic stress data only."));
+  assert.ok(report.findings.find((finding) => finding.category === "coverage")!.limitations.includes(disclosure));
+  const reordered = structuredClone(source); reordered.evidence.reverse();
+  assert.deepEqual(analyzeInvestigation(reordered, options), report);
+});
 
 test("completed full crawl preserves scope and measures early accumulation from token activity, not Base genesis", () => {
   const source = dataset(initial());

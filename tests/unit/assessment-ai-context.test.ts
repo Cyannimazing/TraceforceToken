@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import test from "node:test";
 import { createChatContext, verifyChatContext } from "../../src/agents/chat-context";
 import { readLocalAiConfiguration } from "../../src/agents/config";
-import { createInvestigatorContext, sourceContextSchema } from "../../src/agents/context";
+import { createInvestigatorContext, localAssessmentContextSchema, sourceContextSchema } from "../../src/agents/context";
 import { askInvestigationQuestion, InvestigationQuestionError } from "../../src/agents/questions";
 import { assessInvestigationReport } from "../../src/domain/investigations/report-assessment";
 import { getBrowserReportFixture, getBrowserWalletFlagsFixture } from "../fixtures/report";
@@ -16,7 +16,7 @@ function fixture(unknown = false) {
     sourceUrl: `https://api.dexscreener.com/token-pairs/v1/base/${report.token.address}`, pairAddress: report.infrastructure!.pools[0],
     priceUsd: "0.25", liquidityUsd: 0.01, marketCapUsd: 100, volume24hUsd: 25, priceChange24hPercent: -99, pairCreatedAt: null };
   const capsule = createChatContext(report, config, secret), context = verifyChatContext(capsule, config, secret);
-  return { report, capsule, context, facts: JSON.parse(context.data), assessment: context.assessment! };
+  return { report, capsule, context, facts: JSON.parse(context.data), assessment: localAssessmentContextSchema.parse(context.assessment) };
 }
 const completion = (answer: string, caveat = "These are local normalized rule weights, not calibrated outcome probabilities.") => new Response(JSON.stringify({
   done: true, done_reason: "stop", message: { role: "assistant", content: JSON.stringify({ answer, caveat, evidenceIds: [], needsFreshScan: false }) },
@@ -41,7 +41,7 @@ test("signed assessment preserves deterministic values, unknown categories and b
   assert.ok(supplied.categories.some((row: { points: number | null }) => row.points === null), "no earned points must not turn unassessed categories into factual zeros");
   assert.ok(Buffer.byteLength(context.data, "utf8") <= 6000);
   assert.equal(facts.sourceContext.assessment, undefined, "optional rule metadata does not consume the complete finding budget");
-  const original = createInvestigatorContext(report, { ...config, maxContextBytes: 6000, maxEvidenceRecords: 12 });
+  const original = createInvestigatorContext(report, { ...config, maxContextBytes: 6000, maxEvidenceRecords: 12 }, { includeDecisionPacket: false });
   assert.equal(context.data, original.json);
   assert.deepEqual(context.citations.map((entry) => entry.id), original.context.evidence.map((entry) => entry.id), "no proof is removed or truncated for assessment metadata");
   assert.ok(supplied.gates.some((gate: { authority: string }) => gate.authority === "hypothetical"));
@@ -74,7 +74,9 @@ test("verdict market explanations name their source and accept the official spac
       const body = JSON.parse(String(init?.body));
       assert.match(body.messages[0].content, /Name DEX Screener explicitly/);
       assert.match(body.messages[0].content, /generic past-snapshot caveat does not identify the market source/);
-      assert.equal(body.format.properties.answer.pattern, undefined, "source qualification is checked across answer and caveat without an unsupported model grammar");
+      const sentencePattern = new RegExp(body.format.properties.answer.pattern);
+      assert.equal(sentencePattern.test(`AVOID follows hypothetical sale-model warnings and thin liquidity reported by ${source}.`), true, "sentence guidance permits each supported source-brand spelling");
+      assert.equal(sentencePattern.test("AVOID follows hypothetical sale-model warnings and thin liquidity."), true, "source qualification remains a separate check across answer and caveat, not a forced name in the sentence grammar");
       assert.doesNotMatch(body.messages[0].content, /70 wallets have complete funding records/);
       return completion(`AVOID follows hypothetical sale-model warnings and thin liquidity reported by ${source}.`, "A sale model is hypothetical; selected-pair source figures are not total executable liquidity.");
     } });

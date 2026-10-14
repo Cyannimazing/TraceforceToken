@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { browserFixture, getBrowserReportFixture } from "../fixtures/report";
 
 const publicRoutes = ["/", "/methodology", "/data-sources"] as const;
@@ -19,6 +19,37 @@ function contrast(first: string, second: string) {
   return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
 }
 
+// CSS color-mix and transparent editorial surfaces must be composited over
+// their actual ancestor backgrounds before testing their visible contrast.
+async function renderedColors(page: Page, selectors: Record<string, string>) {
+  return page.evaluate((selectors) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Contrast checks require a 2D color resolver.");
+    const rgba = (value: string) => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const channels = context.getImageData(0, 0, 1, 1).data;
+      return [channels[0], channels[1], channels[2], channels[3] / 255];
+    };
+    const blend = (foreground: number[], background: number[]) => foreground.slice(0, 3).map((value, index) => value * foreground[3] + background[index] * (1 - foreground[3]));
+    const rgb = (channels: number[]) => `rgb(${channels.slice(0, 3).map((value) => Math.round(value)).join(", ")})`;
+    const background = (element: Element) => {
+      const ancestors: Element[] = [];
+      for (let current: Element | null = element; current; current = current.parentElement) ancestors.unshift(current);
+      return ancestors.reduce((color, ancestor) => blend(rgba(getComputedStyle(ancestor).backgroundColor), color), [255, 255, 255]);
+    };
+    return Object.fromEntries(Object.entries(selectors).map(([key, selector]) => {
+      const element = document.querySelector(selector);
+      if (!element) throw new Error(`Missing contrast target: ${selector}`);
+      const style = getComputedStyle(element), surface = background(element);
+      return [key, { background: rgb(surface), text: rgb(blend(rgba(style.color), surface)), border: rgb(blend(rgba(style.borderTopColor), surface)) }];
+    }));
+  }, selectors);
+}
+
 function readNonce(policy: string) {
   const nonce = policy.match(/(?:^|;)\s*script-src\s[^;]*'nonce-([A-Za-z0-9+/]+=*)'/)?.[1];
   expect(nonce, "CSP must contain a generated script nonce").toBeTruthy();
@@ -36,13 +67,13 @@ function assertInlineNonces(html: string, nonce: string) {
 }
 
 for (const route of publicRoutes) {
-  test(`${route} renders its SEO and content without JavaScript`, async ({ browser }) => {
-    const context = await browser.newContext({ javaScriptEnabled: false });
+  test(`${route} renders its SEO and content without JavaScript`, async ({ browser, baseURL }) => {
+    const context = await browser.newContext({ javaScriptEnabled: false, baseURL });
     const page = await context.newPage();
     try {
-      const response = await page.goto(`http://127.0.0.1:3200${route}`);
+      const response = await page.goto(route);
       expect(response?.status()).toBe(200);
-      await expect(page).toHaveTitle(/TraceForce Engine/);
+      await expect(page).toHaveTitle(/TraceForge/);
       await expect(page.locator("h1")).toHaveCount(1);
       await expect(page.locator("h1")).not.toHaveText("");
       await expect(page.locator("html")).toHaveAttribute("lang", "en");
@@ -53,7 +84,7 @@ for (const route of publicRoutes) {
       expect(description?.length).toBeGreaterThan(70);
       expect(description?.length).toBeLessThanOrEqual(170);
       await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
-      await expect(page.locator('meta[property="og:title"]')).toHaveAttribute("content", /TraceForce Engine/);
+      await expect(page.locator('meta[property="og:title"]')).toHaveAttribute("content", /TraceForge/);
       const openGraphUrl = await page.locator('meta[property="og:url"]').getAttribute("content");
       expect(openGraphUrl).toBeTruthy();
       expect(new URL(openGraphUrl!).href).toBe(new URL(`${canonicalOrigin}${route}`).href);
@@ -66,7 +97,7 @@ for (const route of publicRoutes) {
         expect(data["@context"]).toBe("https://schema.org");
         expect(Boolean(data["@graph"]?.length || data["@type"])).toBeTruthy();
       }
-      expect(structuredData.some((json) => JSON.parse(json)["@graph"]?.some((entry: { "@type": string; name?: string }) => entry["@type"] === "Organization" && entry.name === "TraceForce Engine"))).toBe(true);
+      expect(structuredData.some((json) => JSON.parse(json)["@graph"]?.some((entry: { "@type": string; name?: string }) => entry["@type"] === "Organization" && entry.name === "TraceForge"))).toBe(true);
       if (route === "/") {
         await page.setViewportSize({ width: 1440, height: 1000 });
         await page.screenshot({ path: ".next/foundation-desktop.png", fullPage: true });
@@ -100,7 +131,7 @@ test("public pages fit desktop and mobile viewports", async ({ page }) => {
   }
 });
 
-test("system light/dark changes preserve the current report and readable scan controls without an app theme setting", async ({ page }) => {
+test("system themes and a persistent visitor override preserve the current report and readable controls", async ({ page, context }) => {
   let acquisitions = 0;
   await page.route("**/api/investigations", (route) => {
     acquisitions++;
@@ -108,41 +139,34 @@ test("system light/dark changes preserve the current report and readable scan co
   });
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
   await page.goto("/investigate");
+  expect(await page.evaluate(() => localStorage.getItem("traceforge-theme"))).toBeNull();
   await page.getByLabel("Base token contract").fill(browserFixture.token);
   await page.getByRole("button", { name: "Start investigation", exact: true }).click();
   await expect(page.getByRole("heading", { level: 2, name: "Synthetic browser test fixture", exact: true })).toBeVisible();
 
   for (const scheme of ["dark", "light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: scheme });
-    // Edge can update media/custom properties before their dependent colors,
-    // even across two frames at mobile widths. Wait for the actual background
-    // to follow the preference, then assert every original contrast boundary.
+    await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
     await expect.poll(async () => {
-      const background = await page.locator(".engine-shell").evaluate((element) => getComputedStyle(element).backgroundColor);
+      const background = await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor);
       const mean = colorChannels(background).reduce((sum, value) => sum + value, 0) / 3;
       return scheme === "light" ? mean > 220 : mean < 35;
     }, { message: `The rendered ${scheme} background must follow the system preference` }).toBe(true);
     await expect.poll(() => page.locator(".engine-shell").evaluate((element) => getComputedStyle(element).colorScheme)).toBe(scheme);
-    const colors = await page.evaluate(() => {
-      const shell = getComputedStyle(document.querySelector(".engine-shell")!);
-      const form = getComputedStyle(document.querySelector("#investigation-form")!);
-      const input = getComputedStyle(document.querySelector("#token-address")!);
-      const action = getComputedStyle(document.querySelector(".engine-primary-fill")!);
-      return { background: shell.backgroundColor, backgroundToken: shell.getPropertyValue("--background").trim(), text: shell.color, surface: form.backgroundColor,
-        muted: getComputedStyle(document.querySelector("#token-help")!).color,
-        input: input.backgroundColor, inputText: input.color, inputBorder: input.borderTopColor,
-        action: action.backgroundColor, actionText: action.color };
+    const colors = await renderedColors(page, {
+      shell: ".engine-shell", form: "#investigation-form", help: "#token-help",
+      input: "#token-address", action: "#investigation-form button[type=submit]",
     });
-    const mean = colorChannels(colors.background).reduce((sum, value) => sum + value, 0) / 3;
+    const mean = colorChannels(colors.shell.background).reduce((sum, value) => sum + value, 0) / 3;
     expect(scheme === "light" ? mean > 220 : mean < 35).toBe(true);
-    expect(contrast(colors.text, colors.background)).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(colors.muted, colors.surface)).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(colors.inputText, colors.input)).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(colors.inputBorder, colors.input)).toBeGreaterThanOrEqual(3);
-    expect(contrast(colors.actionText, colors.action)).toBeGreaterThanOrEqual(4.5);
-    await expect(page.locator(`meta[name="theme-color"][media="(prefers-color-scheme: ${scheme})"]`)).toHaveAttribute("content", colors.backgroundToken);
+    expect(contrast(colors.shell.text, colors.shell.background)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colors.help.text, colors.help.background)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colors.input.text, colors.input.background)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colors.input.border, colors.input.background), `${scheme} input boundary contrast`).toBeGreaterThanOrEqual(3);
+    expect(contrast(colors.action.text, colors.action.background)).toBeGreaterThanOrEqual(4.5);
+    await expect(page.locator(`meta[name="theme-color"][media="(prefers-color-scheme: ${scheme})"]`)).toHaveAttribute("content", scheme === "dark" ? "#111319" : "#f7f6f2");
     await page.getByRole("button", { name: "Start investigation", exact: true }).hover();
-    const hovered = await page.locator(".engine-primary-fill").evaluate((element) => ({ text: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor }));
+    const hovered = (await renderedColors(page, { action: "#investigation-form button[type=submit]" })).action;
     expect(contrast(hovered.text, hovered.background)).toBeGreaterThanOrEqual(4.5);
     if (scheme === "light") {
       await page.setViewportSize({ width: 1440, height: 1000 });
@@ -153,13 +177,35 @@ test("system light/dark changes preserve the current report and readable scan co
     await page.screenshot({ path: `.next/investigation-system-${scheme}-${page.viewportSize()?.width === 1440 ? "desktop" : "mobile"}.png`, fullPage: true });
     await expect(page.getByLabel("Base token contract")).toHaveValue(browserFixture.token);
     await expect(page.getByRole("heading", { level: 2, name: "Synthetic browser test fixture", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: /theme|light mode|dark mode/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: `Switch to ${scheme === "dark" ? "light" : "dark"} mode`, exact: true })).toBeVisible();
     await page.setViewportSize({ width: 375, height: 812 });
     const dimensions = await page.evaluate(() => ({ viewport: document.documentElement.clientWidth, document: document.documentElement.scrollWidth }));
     expect(dimensions.document).toBeLessThanOrEqual(dimensions.viewport + 1);
   }
   expect(acquisitions).toBe(1);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
+
+  await page.getByRole("button", { name: "Switch to light mode", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await page.evaluate(() => localStorage.getItem("traceforge-theme"))).toBe("light");
+  for (const scheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await expect(page.getByRole("button", { name: "Switch to dark mode", exact: true })).toBeVisible();
+    await expect(page.getByLabel("Base token contract")).toHaveValue(browserFixture.token);
+    await expect(page.getByRole("heading", { level: 2, name: "Synthetic browser test fixture", exact: true })).toBeVisible();
+  }
+  const freshTab = await context.newPage();
+  try {
+    await freshTab.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    await freshTab.goto("/investigate");
+    await expect(freshTab.locator("html")).toHaveAttribute("data-theme", "light");
+    await expect(freshTab.getByRole("button", { name: "Switch to dark mode", exact: true })).toBeVisible();
+    await expect(freshTab.getByLabel("Base token contract")).toHaveValue("");
+    await expect(freshTab.getByRole("heading", { level: 2, name: "Synthetic browser test fixture", exact: true })).toHaveCount(0);
+  } finally { await freshTab.close(); }
+  expect(acquisitions).toBe(1);
+  expect(await page.evaluate(() => ({ local: Object.keys(localStorage).sort(), session: sessionStorage.length }))).toEqual({ local: ["traceforge-theme"], session: 0 });
 });
 
 test("public document bodies and cards follow the system theme while intentional hero surfaces remain readable", async ({ page }) => {
@@ -169,18 +215,15 @@ test("public document bodies and cards follow the system theme while intentional
       await page.goto(route);
       const bodySelector = route === "/" ? ".questions-section" : ".document-body";
       const cardSelector = route === "/" ? ".question-card" : route === "/methodology" ? ".content-card" : ".source-card";
-      const colors = await page.evaluate(({ bodySelector, cardSelector }) => {
-        const section = getComputedStyle(document.querySelector(bodySelector)!);
-        const card = getComputedStyle(document.querySelector(cardSelector)!);
-        const paragraph = getComputedStyle(document.querySelector(`${cardSelector} p:not(.eyebrow):not(.question-label)`)!);
-        return { scheme: getComputedStyle(document.documentElement).colorScheme,
-          section: section.backgroundColor, text: section.color, card: card.backgroundColor, paragraph: paragraph.color };
-      }, { bodySelector, cardSelector });
-      expect(colors.scheme).toBe(scheme);
-      const mean = colorChannels(colors.section).reduce((sum, value) => sum + value, 0) / 3;
+      await expect(page.locator("html")).toHaveAttribute("data-theme", scheme);
+      const colors = await renderedColors(page, {
+        section: bodySelector, paragraph: `${cardSelector} p:not(.eyebrow):not(.question-label)`,
+      });
+      expect(await page.locator("html").evaluate((element) => getComputedStyle(element).colorScheme)).toBe(scheme);
+      const mean = colorChannels(colors.section.background).reduce((sum, value) => sum + value, 0) / 3;
       expect(scheme === "light" ? mean > 220 : mean < 35).toBe(true);
-      expect(contrast(colors.text, colors.section)).toBeGreaterThanOrEqual(4.5);
-      expect(contrast(colors.paragraph, colors.card)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(colors.section.text, colors.section.background)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(colors.paragraph.text, colors.paragraph.background)).toBeGreaterThanOrEqual(4.5);
     }
   }
 });
@@ -247,11 +290,11 @@ test("client navigation works without browser errors or CSP violations", async (
   await page.getByRole("navigation", { name: "Main navigation" }).getByRole("link", { name: "Methodology", exact: true }).click();
   await expect(page).toHaveURL(/\/methodology$/);
   await expect(page.locator("h1")).toBeVisible();
-  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("link", { name: "Data sources" }).click();
+  await page.getByRole("navigation", { name: "Main navigation" }).getByRole("link", { name: "Sources", exact: true }).click();
   await expect(page).toHaveURL(/\/data-sources$/);
   await expect(page.locator("h1")).toBeVisible();
-  await page.getByRole("banner").getByRole("link", { name: "TraceForce Engine home" }).click();
-  await expect(page).toHaveURL("http://127.0.0.1:3200/");
+  await page.getByRole("banner").getByRole("link", { name: "TraceForge home" }).click();
+  await expect(page).toHaveURL(/\/$/);
   await expect(page.locator("h1")).toBeVisible();
   const violations = await page.evaluate(() => (window as unknown as { __traceforgeCspViolations: string[] }).__traceforgeCspViolations);
   expect(violations).toEqual([]);
@@ -272,13 +315,15 @@ test("browser metadata serves the generated tab and Apple icons as valid local i
   await page.goto("/investigate");
   const links = await page.locator('link[rel="icon"], link[rel="apple-touch-icon"]').evaluateAll((elements) => elements.map((element) => {
     const link = element as HTMLLinkElement;
-    return { href: link.href, rel: link.rel, type: link.type };
+    return { href: link.href, rel: link.rel, type: link.type, sizes: link.sizes.value };
   }));
   const png = links.find((link) => new URL(link.href).pathname === "/icon.png");
   const ico = links.find((link) => new URL(link.href).pathname === "/favicon.ico");
+  const svg = links.find((link) => new URL(link.href).pathname === "/icon.svg");
   const apple = links.find((link) => link.rel === "apple-touch-icon" && new URL(link.href).pathname === "/apple-icon.png");
-  expect(png).toBeTruthy(); expect(ico).toBeTruthy(); expect(apple).toBeTruthy();
-  for (const [link, size] of [[png!, 32], [apple!, 180]] as const) {
+  expect(png).toBeTruthy(); expect(ico).toBeTruthy(); expect(apple).toBeTruthy(); expect(svg).toBeTruthy();
+  for (const [link, size] of [[png!, 512], [apple!, 180]] as const) {
+    expect(link.sizes).toBe(`${size}x${size}`);
     expect(new URL(link.href).origin).toBe(new URL(page.url()).origin);
     const response = await page.request.get(link.href);
     expect(response.status()).toBe(200);
@@ -295,7 +340,16 @@ test("browser metadata serves the generated tab and Apple icons as valid local i
   expect(image.readUInt16LE(0)).toBe(0); expect(image.readUInt16LE(2)).toBe(1);
   expect(image.readUInt16LE(4)).toBeGreaterThan(0);
   expect(image[6]).toBe(32); expect(image[7]).toBe(32);
-  await expect(page.getByRole("banner").getByRole("link", { name: "TraceForce Engine home" }).locator("img")).toHaveAttribute("src", "/brand/traceforce-mark.png");
+  expect(new URL(svg!.href).origin).toBe(new URL(page.url()).origin);
+  expect(svg!.sizes).toBe("any");
+  const vector = await page.request.get(svg!.href);
+  expect(vector.status()).toBe(200);
+  expect(vector.headers()["content-type"]).toContain("image/svg+xml");
+  expect(await vector.text()).toMatch(/<svg\b[^>]*viewBox=/);
+  const brand = page.getByRole("banner").getByRole("link", { name: "TraceForge home" });
+  await expect(brand.locator("svg.tf-brand-mark")).toBeVisible();
+  await expect(brand.locator("path.tf-brand-trace")).toHaveAttribute("pathLength", "1");
+  await expect(brand.locator("rect.tf-brand-node")).toHaveCount(3);
 });
 
 test("health exposes liveness without database or secret details", async ({ request }) => {

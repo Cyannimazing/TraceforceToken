@@ -18,8 +18,8 @@ export interface DeploymentReview {
 
 const PRIVATE_DATABASE_ENV = ["DATABASE_URL", "DATABASE_MIGRATION_URL", "TEST_DATABASE_URL", "DATABASE_CA_CERT", "DATABASE_SSL", "DATABASE_POOL_SIZE"];
 const PRIVATE_ADMIN_ENV = ["DATABASE_MIGRATION_URL", "TEST_DATABASE_URL", "CRON_SECRET"];
-const ENGINE_ONLY_ENV = ["BASE_RPC_URL", "BASE_RPC_FALLBACK_URLS", "BASE_LOG_RPC_URL", "BASE_ALCHEMY_RPC_URL", "BASE_TRANSFER_SOURCE", "BASE_RPC_ALLOWED_HOSTS", "BASE_FUNDING_SOURCE", "BLOCKSCOUT_API_KEY", "GOPLUS_ACCESS_TOKEN", "LOCAL_AI_BASE_URL", "LOCAL_AI_MODEL", "LOCAL_AI_KEEP_ALIVE_SECONDS", "GEMINI_API_KEY", "GEMINI_MODEL"];
-const PUBLIC_SECRET_ENV = ["NEXT_PUBLIC_DATABASE_URL", "NEXT_PUBLIC_DATABASE_MIGRATION_URL", "NEXT_PUBLIC_RATE_LIMIT_SECRET", "NEXT_PUBLIC_SCAN_ENGINE_SECRET", "NEXT_PUBLIC_BASE_RPC_URL", "NEXT_PUBLIC_BASE_RPC_FALLBACK_URLS", "NEXT_PUBLIC_BASE_LOG_RPC_URL", "NEXT_PUBLIC_BASE_ALCHEMY_RPC_URL", "NEXT_PUBLIC_BLOCKSCOUT_API_KEY", "NEXT_PUBLIC_GOPLUS_ACCESS_TOKEN", "NEXT_PUBLIC_GEMINI_API_KEY"];
+const ENGINE_ONLY_ENV = ["BASE_RPC_URL", "BASE_RPC_FALLBACK_URLS", "BASE_LOG_RPC_URL", "BASE_ALCHEMY_RPC_URL", "BASE_TRANSFER_SOURCE", "BASE_RPC_ALLOWED_HOSTS", "BASE_FUNDING_SOURCE", "BLOCKSCOUT_API_KEY", "GOPLUS_ACCESS_TOKEN", "LOCAL_AI_BASE_URL", "LOCAL_AI_MODEL", "LOCAL_AI_KEEP_ALIVE_SECONDS", "GEMINI_API_KEY", "GEMINI_MODEL", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_FREE_ONLY", "OPENROUTER_ALLOW_DATA_COLLECTION", "INVESTIGATOR_AI_PROVIDER"];
+const PUBLIC_SECRET_ENV = ["NEXT_PUBLIC_DATABASE_URL", "NEXT_PUBLIC_DATABASE_MIGRATION_URL", "NEXT_PUBLIC_RATE_LIMIT_SECRET", "NEXT_PUBLIC_SCAN_ENGINE_SECRET", "NEXT_PUBLIC_BASE_RPC_URL", "NEXT_PUBLIC_BASE_RPC_FALLBACK_URLS", "NEXT_PUBLIC_BASE_LOG_RPC_URL", "NEXT_PUBLIC_BASE_ALCHEMY_RPC_URL", "NEXT_PUBLIC_BLOCKSCOUT_API_KEY", "NEXT_PUBLIC_GOPLUS_ACCESS_TOKEN", "NEXT_PUBLIC_GEMINI_API_KEY", "NEXT_PUBLIC_OPENROUTER_API_KEY"];
 const present = (environment: Environment, names: readonly string[]) => names.some((name) => Boolean(environment[name]?.trim()));
 const secret = (value: string | undefined) => Boolean(value && value.length >= 32 && value.length <= 512
   && /^[\x21-\x7e]+$/.test(value) && !/(?:replace[_-]?me|your[_-]?(?:secret|password)|change[_-]?me)/i.test(value));
@@ -73,9 +73,11 @@ export function reviewDeploymentEnvironment(
     check("production-indexer-plan", "SQD public testing funding is local development only; configure an approved production funding plan before deploying the engine.", () => readProviderConfiguration(production).fundingSource !== "sqd-public-testing");
     check("cpu-model", "Configure an approved bounded AI provider; local inference retains the prepared private CPU layout.", () => {
       const providers = readInvestigatorAiConfiguration(production);
-      if (providers.gemini && (providers.gemini.maxContextBytes > 8000 || providers.gemini.maxEvidenceRecords > 12 || providers.gemini.maxOutputTokens > 800 || providers.gemini.contextTokens > 4096)) return false;
+      for (const cloud of [providers.openrouter, providers.gemini]) {
+        if (cloud && (cloud.maxContextBytes > 8000 || cloud.maxEvidenceRecords > 12 || cloud.maxOutputTokens > 800 || cloud.contextTokens > 4096)) return false;
+      }
       const ai = providers.local;
-      if (!ai) return Boolean(providers.gemini);
+      if (!ai) return Boolean(providers.openrouter || providers.gemini);
       return ai.baseUrl === "http://127.0.0.1:11434" && ai.model === "traceforce-investigator"
         && ai.threads === 2 && ai.gpuLayers === 0 && ai.contextTokens <= 4096
         && ai.maxEvidenceRecords <= 12 && ai.maxOutputTokens <= 800 && ai.maxContextBytes <= 8000;

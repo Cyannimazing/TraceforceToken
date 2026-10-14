@@ -1,10 +1,28 @@
 import { ArrowUpRight } from "lucide-react";
 import type { InvestigationReport } from "@/domain/investigations/types";
 import { deriveHolderPopulationBreakdown } from "@/domain/investigations/holder-population";
+import { derivePrimaryAssessment } from "@/domain/investigations/primary-assessment";
+import { SwarmSourceTime } from "./investigation-swarm-assessment";
 
 const dollars = (value: number | null) => value === null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 2 }).format(value);
 
 export function InvestigationMarketSummary({ report }: { report: InvestigationReport }) {
+  const primary = derivePrimaryAssessment(report);
+  if (primary.status === "reported") {
+    const snapshot = primary.snapshot, source = snapshot.header;
+    const metrics = [
+      { label: "Price (reported)", value: source.price_usd === null ? "—" : `$${source.price_usd}`, change: source.change24h === null ? null : `${source.change24h > 0 ? "+" : ""}${source.change24h}%` },
+      { label: "MCAP", value: dollars(source.mcap), change: null },
+      { label: "Liquidity", value: dollars(source.liquidity_usd), change: null },
+      { label: "24H Vol", value: dollars(source.vol24h), change: null },
+      { label: "Age (SWARM)", value: source.age_h === null ? "—" : source.age_h < 1 ? "<1h" : source.age_h < 24 ? `${Math.floor(source.age_h)}h` : `${Math.floor(source.age_h / 24)}d`, change: null },
+      { label: "Holders (SWARM)", value: source.holders_count === null ? "—" : String(source.holders_count), change: null },
+    ];
+    return <section aria-labelledby="market-title" className="traceforce-market-strip overflow-hidden border border-border bg-surface" data-market-source="swarm" data-market-price={source.price_usd ?? undefined}>
+      <h3 id="market-title" className="sr-only">Market snapshot</h3><dl className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">{metrics.map((metric) => <div key={metric.label} className={metric.label === "Price (reported)" ? "col-span-2 min-w-0 border-border px-4 py-3 sm:col-span-1" : "min-w-0 border-border px-4 py-3"}><dt className="font-mono text-[9px] uppercase tracking-wider text-muted">{metric.label}</dt><dd className="mt-1 flex flex-wrap items-baseline gap-x-2 break-all font-mono text-lg font-semibold text-foreground"><span className={metric.label === "Price (reported)" ? "text-sm sm:text-lg" : undefined}>{metric.value}</span>{metric.change !== null && <span className="text-[10px] font-normal text-muted" aria-label={`24-hour price change ${metric.change}`}>24h {metric.change}</span>}</dd></div>)}</dl>
+      <div className="space-y-2 border-t border-border px-4 py-3 text-xs leading-5 text-muted"><div className="flex flex-wrap items-center justify-between gap-2"><SwarmSourceTime snapshot={snapshot} /><a href={snapshot.sourceUrl} target="_blank" rel="noopener noreferrer nofollow" className="inline-flex min-h-11 items-center gap-1 underline underline-offset-4">SWARM market source<ArrowUpRight size={11} aria-hidden="true" /></a></div><p>Market values and the total holder count are source-reported. The report’s filtered wallet rows can have a different count.</p>{source.price_usd !== null && (source.liquidity_usd === null || source.liquidity_usd < 10_000) && <p className="font-medium text-warning">{source.liquidity_usd === null ? "Liquidity was not reported; sale value remains unknown." : "Low liquidity: the displayed quote is not a guaranteed selling price."}</p>}</div>
+    </section>;
+  }
   const market = report.token.marketSnapshot;
   const reported = market?.status === "reported" ? market : null;
   const security = report.token.securitySnapshot;
@@ -31,7 +49,8 @@ export function InvestigationMarketSummary({ report }: { report: InvestigationRe
   ];
   return <section aria-labelledby="market-title" className="traceforce-market-strip overflow-hidden border border-border bg-surface">
     <h3 id="market-title" className="sr-only">Market snapshot</h3>
-    <dl className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">{metrics.map((metric) => <div key={metric.label} className="min-w-0 border-border px-4 py-3">
+    {primary.authority === "swarm" && <p className="border-b border-border px-4 py-3 text-xs font-medium text-muted">Independent market context · DEX Screener. SWARM market data is unavailable.</p>}
+    <dl className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">{metrics.map((metric) => <div key={metric.label} className={metric.label === "Price (reported)" ? "col-span-2 min-w-0 border-border px-4 py-3 sm:col-span-1" : "min-w-0 border-border px-4 py-3"}>
       <dt title={metric.description} className="font-mono text-[9px] uppercase tracking-wider text-muted">{metric.label}</dt>
       <dd className="mt-1 flex flex-wrap items-baseline gap-x-2 break-all font-mono text-lg font-semibold text-foreground"><span className={metric.label === "Price (reported)" ? "text-sm sm:text-lg" : undefined} title={metric.label === "Price (reported)" ? metric.value : undefined}>{metric.value}</span>{metric.change && <span className="text-[10px] font-normal text-muted" title="24-hour price change" aria-label={`24-hour price change ${metric.change}`}>24h {metric.change}</span>}{metric.description && <span className="sr-only">{metric.description}</span>}</dd>
     </div>)}</dl>

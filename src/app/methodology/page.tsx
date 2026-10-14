@@ -1,59 +1,30 @@
 import Link from "next/link";
-import { ArrowUpRight } from "lucide-react";
-import { PageIntro, SiteFooter, SiteHeader } from "@/components/site-shell";
+import { ArrowRight, ArrowUpRight } from "lucide-react";
+import { SiteFooter, SiteHeader } from "@/components/site-shell";
 import { StructuredData } from "@/components/structured-data";
 import { breadcrumbStructuredData, createMetadata } from "@/lib/seo";
+import "@/components/traceforge-pages.css";
 
-export const metadata = createMetadata({
-  title: "Investigation methodology",
-  description: "How TraceForce Engine will connect token funding, wallet relationships, accumulation, and selling to verifiable on-chain evidence and explicit coverage limits.",
-  path: "/methodology",
-});
-
+export const metadata = createMetadata({ title: "Investigation methodology", description: "How TraceForge follows wallet funding, checks relationships and explains token activity using public evidence, consistent snapshots and clear coverage limits.", path: "/methodology" });
 const questions = [
-  { title: "Who funded the wallets?", text: "Trace observed native-asset funding to its source transaction. A bounded history supports first observed funding; lifetime-first funding requires complete eligible history. Exchange, bridge, and service hubs need separate treatment." },
-  { title: "Which wallets are connected?", text: "Build associations from identifiable funding and direct-transfer evidence. Shared timing alone will not merge wallets. A connection describes observed activity, not a verified common owner." },
-  { title: "Who accumulated early?", text: "Compare net acquisitions against a supported launch reference and the period examined. A pool creation time is a market observation. When launch history is missing, describe activity as early in the observed window." },
-  { title: "What suggests coordinated selling?", text: "Establish relationships before the exits, verify supported swaps and net token flows, then examine multiple linked sellers in a declared time window. A transfer into a pool, or simultaneous activity alone, does not prove a coordinated sale." },
+  { title: "Who funded the wallets?", text: "Follow observed native-asset funding back to its transaction. We describe the first funding found in the examined history. Exchange, bridge and service addresses need separate treatment because unrelated people can use the same service." },
+  { title: "Which wallets are connected?", text: "Inspect shared funding and direct transfers. Every acquired link has an identifiable reason. A connected group is a lead to investigate; it is not a verified count of people or proof that one person controls every wallet." },
+  { title: "Who accumulated early?", text: "Compare token inflows with the earliest examined interval and any supported launch reference. Receiving tokens is not automatically buying them. A partial window cannot establish activity since launch." },
+  { title: "What supports a coordinated exit?", text: "Check relationships that existed before the exits, then examine supported swaps and net token flows. A transfer into a pool or similar timing alone does not establish coordinated selling." },
 ];
 
 export default function MethodologyPage() {
-  return (
-    <>
-      <SiteHeader active="methodology" />
-      <main id="main-content">
-        <PageIntro eyebrow="METHODOLOGY / EVIDENCE FIRST" title="A story you can trace back to its source." description="The investigation engine is in development. These are the evidence standards that will guide the first Base implementation." />
-        <section className="document-body">
-          <div className="site-container">
-            <div className="prose">
-              <h2>Four questions. One traceable record.</h2>
-              <p>Every finding should link to the chain, block hash, transaction, log or trace position, provider observation, and rule version that produced it. Facts, inferred associations, and unknowns will remain distinct.</p>
-            </div>
-            <div className="content-grid methodology-grid">
-              {questions.map((question, index) => (
-                <article className="content-card prose" key={question.title}>
-                  <p className="eyebrow">QUESTION {String(index + 1).padStart(2, "0")}</p>
-                  <h3>{question.title}</h3>
-                  <p>{question.text}</p>
-                </article>
-              ))}
-            </div>
-            <div className="prose">
-              <h2>Coverage belongs in the finding.</h2>
-              <p>A report will state the blocks and time range examined, wallets checked, query limits, indexing lag, and failed sources. Missing data is unknown. Partial transfer history cannot silently become a current-balance claim.</p>
-              <h2>Recent history can change.</h2>
-              <p>Base transactions have different confirmation and finality stages. Ingestion will retain block hashes, recheck recent blocks, and invalidate affected evidence after a reorganization. Reports will disclose the confirmation policy used.</p>
-              <p><a href="https://docs.base.org/specifications/transactions/transaction-finality" target="_blank" rel="noopener noreferrer">Read Base’s transaction finality documentation <ArrowUpRight size={14} aria-hidden="true" /></a></p>
-              <h2>Validation before live claims.</h2>
-              <p>Every submission collects fresh data through bounded RPC and indexed-history adapters, then runs deterministic analysis and prepares a plain English explanation. Reports and evidence are not stored as server history. You can explicitly save a snapshot in your own browser or download its JSON; opening a browser snapshot does not run a new crawl. Questions use the current report and disclose when fresh data is needed. Fixtures test exact amounts, coverage limits, hub exclusions, failed sources, conflicting block hashes, and supported swap flows. Comprehensive live detection benchmarks remain a release requirement.</p>
-              <div className="page-note"><strong>Designed for investigation.</strong> The goal is to make the evidence reviewable. A relationship is not an identity, and an analytical finding does not guarantee what a token will do next.</div>
-              <Link className="document-action" href="/data-sources">Review the planned data sources <ArrowUpRight size={16} aria-hidden="true" /></Link>
-            </div>
-          </div>
-        </section>
-      </main>
-      <SiteFooter />
-      <StructuredData value={breadcrumbStructuredData([{ name: "TraceForce Engine", path: "/" }, { name: "Methodology", path: "/methodology" }])} />
-    </>
-  );
+  return <div className="tf-public tf-doc"><SiteHeader active="methodology" /><main id="main-content">
+    <section className="tf-container tf-document-hero"><p className="tf-eyebrow"><span className="tf-mini-square" />THE METHODOLOGY</p><h1>Follow the signal.<br /><em>Check the story.</em></h1><p>Good investigation starts with questions.<br />Useful answers come with evidence.</p><span className="tf-document-motif" aria-hidden="true"><span /><span /><span /><span /></span></section>
+    <section className="document-body tf-document-body"><div className="tf-container tf-doc-spread">
+      <aside className="tf-doc-sidebar"><p className="tf-eyebrow">IN THIS GUIDE</p><nav aria-label="Methodology sections"><a href="#questions">Four questions <ArrowRight size={14} aria-hidden="true" /></a><a href="#evidence">The evidence standard <ArrowRight size={14} aria-hidden="true" /></a><a href="#explanations">How AI helps <ArrowRight size={14} aria-hidden="true" /></a><a href="#your-report">Your report <ArrowRight size={14} aria-hidden="true" /></a></nav><p>Base first.<br />Evidence always.</p></aside>
+      <div className="tf-doc-content">
+        <section id="questions" className="tf-doc-section"><p className="tf-eyebrow">01 / THE INVESTIGATION</p><h2>Four questions.<br />One connected picture.</h2><p>TraceForge follows funding, wallet relationships, accumulation and selling. The report keeps observed activity, provider claims and analytical conclusions identifiable.</p><div className="tf-method-questions">{questions.map((question, index) => <article className="content-card tf-method-question" key={question.title}><span className="tf-method-number">{String(index + 1).padStart(2, "0")}</span><div><h3>{question.title}</h3><p>{question.text}</p></div></article>)}</div></section>
+        <section id="evidence" className="tf-doc-section"><p className="tf-eyebrow">02 / THE EVIDENCE STANDARD</p><h2>A finding you can follow.</h2><p>The main assessment uses one SWARM response for its reported score, verdict, market figures, grouped bubbles and holder rows. Alchemy and Base RPC separately acquire and verify supported transactions and balances at a declared finalized snapshot. Each view keeps its own source and time.</p><div className="tf-principle-grid"><article><span className="tf-mini-square" /><h3>One consistent source</h3><p>Main SWARM bubbles and holder rows retain its reported cohort and shares. The independent blockchain graph and table share their own pinned population and percentage basis.</p></article><article><span className="tf-mini-square" /><h3>Visible coverage</h3><p>The report shows the period examined and any remaining gaps. Missing SWARM data stays unavailable; an independent local score does not silently replace it.</p></article><article><span className="tf-mini-square" /><h3>Source differences matter</h3><p>Reported holder totals, examined wallets and inferred groups are different counts. SWARM’s “hands” do not establish real people or common ownership.</p></article><article><span className="tf-mini-square" /><h3>Recent blocks need care</h3><p>Independent acquisition retains block hashes and checks its pinned boundary. A source assessment’s scan time is separate from that blockchain snapshot.</p></article></div><a className="tf-text-link" href="https://docs.base.org/specifications/transactions/transaction-finality" target="_blank" rel="noopener noreferrer">Base transaction finality <ArrowUpRight size={16} aria-hidden="true" /></a></section>
+        <section id="explanations" className="tf-doc-section"><p className="tf-eyebrow">03 / THE EXPLANATION</p><h2>Clarity, grounded<br />in what was found.</h2><p>AI explains the report’s primary SWARM assessment and supported findings in human language. The engine checks selected references and citations. Ordinary score and verdict questions use that same source snapshot; questions about independent blockchain checks use their separately retained evidence.</p><div className="tf-inline-note"><span className="tf-mini-square" /><p>A relationship is not an identity. Source model weights are not independently calibrated fraud probabilities, and a risk assessment does not guarantee future price or safety.</p></div><p>Automated checks and browser tests help catch inconsistent amounts, missing proof and broken interactions. Broad live detection and outcome benchmarks remain separate work. Historical saved reports retain the assessment authority they originally used.</p></section>
+        <section id="your-report" className="tf-doc-section"><p className="tf-eyebrow">04 / YOUR REPORT</p><h2>A fresh investigation.<br />A snapshot you control.</h2><p>A new submission acquires data for that request. Reports and conversations are not kept as our server history. You can explicitly save a report snapshot in your browser or download a copy.</p><details className="tf-details"><summary>What a saved snapshot means</summary><p>A snapshot retains the original scan time and coverage. Opening it does not run another crawl. Chat capsules and conversations are excluded; questions on a restored snapshot require a fresh scan.</p></details><Link className="tf-button tf-button-primary" href="/investigate">Investigate a token <ArrowUpRight size={18} aria-hidden="true" /></Link></section>
+      </div>
+    </div></section>
+    <section className="tf-container tf-document-next"><p className="tf-eyebrow">CONTINUE EXPLORING</p><Link href="/data-sources">Know your sources.<ArrowUpRight size={30} strokeWidth={1.2} aria-hidden="true" /></Link></section>
+  </main><SiteFooter /><StructuredData value={breadcrumbStructuredData([{ name: "TraceForge", path: "/" }, { name: "Methodology", path: "/methodology" }])} /></div>;
 }

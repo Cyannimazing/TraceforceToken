@@ -1,6 +1,18 @@
-# TraceForce interface components
+# TraceForge interface components
 
-Updated: 2026-10-12. The investigation workspace uses Aceternity registry components installed through its [official CLI workflow](https://ui.aceternity.com/docs/cli), then adapted to TraceForce's evidence model, browser theme preference and security policy.
+Updated: 2026-10-13. Every route now shares an editorial TraceForge system: self-hosted Instrument Serif and Manrope, warm white/charcoal themes, cobalt/cyan/violet/coral accents, fine network lines and original vector branding. Font licenses are retained beside the local assets.
+
+The root `TraceForgeExperience` persists the decorative canvas and SVG crawler across navigation. Its six articulated legs, eyes, body, turns and reactions are controlled by randomized states and collision-checked paths. Geometry is measured on layout/scroll changes with a bounded refresh; frame animation updates SVG/canvas directly rather than rerendering React. Desktop and mobile have different density and frame budgets. The crawler never captures pointer events. Effects pause, a separate hide control, reduced motion and tab visibility suspend motion.
+
+`TraceForgeNavigation` supplies the shared mobile menu, active links, vector mark and theme control. A nonce-bearing prepaint bootstrap applies the saved theme before rendering; system preferences remain active until an explicit choice. Only the theme choice is stored. Internal transitions, button motion, card reveals and disclosure entrances use CSS/Web Animations and the existing Motion dependency, with cleanup and keyboard support.
+
+Report graphs and holder tables continue to use the same verified cohort and denominator. The simple report exposes a direct summary, score and important checks; proof, source context and acquisition gaps remain inspectable through disclosures. The background illustration and crawler never represent acquired evidence or scan progress. Machine precision attributes support verification without displaying raw unit strings.
+
+Original symbol, horizontal light/dark logos, monochrome SVG, favicon, app and Apple icons live in `public/brand` and `src/app`. Raster icons were rendered from the vector mark with transparent backgrounds. The current design uses no external font requests or additional animation library.
+
+## Historical component installation and earlier design
+
+The following dated notes describe the preceding TraceForce interface. Its components remain in the repository where still useful; the old laser/background and raw AI-receipt presentation are not the current design. The registry source was installed through the [official CLI workflow](https://ui.aceternity.com/docs/cli) before local adaptation.
 
 ## Actual installation
 

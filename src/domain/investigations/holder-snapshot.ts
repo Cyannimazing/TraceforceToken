@@ -27,7 +27,7 @@ export const holderSnapshotSchema: z.ZodType<HolderSnapshot> = z.object({
   balances: z.object({ status, requestedWallets: count, verifiedWallets: count, reason }).strict(),
   holders: z.array(z.object({
     address, balanceRaw: raw.nullable(), status: z.enum(["verified", "unavailable", "not_examined"]),
-    discoveredBy: z.enum(["indexed", "observed", "both"]),
+    discoveredBy: z.enum(["indexed", "observed", "both", "external"]),
   }).strict()),
   provenance: z.object({
     provider: z.literal("Base RPC"),
@@ -43,7 +43,7 @@ export const holderSnapshotSchema: z.ZodType<HolderSnapshot> = z.object({
     || value.holders.some((item) => (item.status === "verified") !== (item.balanceRaw !== null))
     || value.balances.requestedWallets !== value.holders.length
     || value.balances.verifiedWallets !== verified.length || value.balances.status !== expected
-    || value.discovery.addresses !== value.holders.filter((item) => item.discoveredBy !== "observed").length
+    || value.discovery.addresses !== value.holders.filter((item) => item.discoveredBy === "indexed" || item.discoveredBy === "both").length
     || (["unavailable", "not_examined"].includes(value.discovery.status) && (value.discovery.pages !== 0 || value.discovery.addresses !== 0))
     || (["complete", "partial"].includes(value.discovery.status) && value.discovery.pages === 0)
     || !approvedHolderSource(value.discovery.provider, value.tokenAddress, value.discovery.sourceUrl)

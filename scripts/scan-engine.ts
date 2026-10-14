@@ -41,11 +41,11 @@ export function createScanEngineServer(options: EngineOptions) {
     const supplied = Buffer.from(header.slice(7));
     return supplied.length === expected.length && timingSafeEqual(expected, supplied);
   }
-  function errorResponse(response: ServerResponse, status: number, message: string) {
+  function errorResponse(response: ServerResponse, status: number, message: string, code?: "AI_RATE_LIMITED") {
     if (response.destroyed) return;
     if (response.headersSent) { response.destroy(); return; }
     response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", ...(status === 429 ? { "retry-after": "10" } : {}) });
-    response.end(JSON.stringify({ error: message }));
+    response.end(JSON.stringify({ error: message, ...(code ? { code } : {}) }));
   }
   async function stream(response: Response, target: ServerResponse, signal: AbortSignal) {
     const headers: Record<string, string> = {}; response.headers.forEach((value, name) => { headers[name] = value; });
@@ -110,6 +110,7 @@ export function createScanEngineServer(options: EngineOptions) {
       }
     } catch (error) {
       if (error instanceof ChatContextError || error instanceof InvestigationQuestionError) {
+        if (error instanceof InvestigationQuestionError && error.code === "RATE_LIMITED") { errorResponse(response, 503, "The AI service has reached its request limit. Try again after the limit resets.", "AI_RATE_LIMITED"); return; }
         if (error.code === "OUT_OF_SCOPE") { errorResponse(response, 400, "Ask about this scan's funding, wallet links, accumulation, sales, evidence, or coverage."); return; }
         const status = error.code === "EXPIRED_CONTEXT" ? 410 : error.code === "INVALID_CONTEXT" || error.code === "INVALID_QUESTION" ? 400 : error.code === "CONTEXT_LIMIT" ? 413 : error.code === "TIMEOUT" ? 504 : 503;
         errorResponse(response, status, status === 410 ? "This scan context expired. Start a fresh scan." : status === 400 || status === 413 ? "The question or scan context is invalid. Start a fresh scan." : "The question could not be answered. Try again shortly.");
@@ -136,14 +137,14 @@ async function main() {
   const secret = validateEngineSecret(process.env.SCAN_ENGINE_SECRET);
   const port = Number(process.env.SCAN_ENGINE_PORT ?? 8787);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid SCAN_ENGINE_PORT.");
-  const [{ readProviderConfiguration }, { validateProviderDestination }, { collectInvestigationWithConfig }, { readInvestigatorAiConfiguration }, { runInvestigatorWithConfig, createInvestigatorChatContext, verifyInvestigatorChatContext, askInvestigatorQuestion }] = await Promise.all([
-    import("../src/providers/base/config"), import("../src/providers/base/transport"), import("../src/providers/base/collector"), import("../src/agents/config"), import("../src/agents/inference"),
+  const [{ readProviderConfiguration }, { validateProviderDestination }, { collectInvestigationWithConfig }, { readInvestigatorAiConfiguration }, { runInvestigatorWithConfig, createInvestigatorChatContext, verifyInvestigatorChatContext, askInvestigatorQuestion }, { fetchSwarmAssessment }, { fetchOptionalProviderEnrichment }] = await Promise.all([
+    import("../src/providers/base/config"), import("../src/providers/base/transport"), import("../src/providers/base/collector"), import("../src/agents/config"), import("../src/agents/inference"), import("../src/providers/swarm"), import("../src/providers/enrichment"),
   ]);
   const provider = readProviderConfiguration(); const ai = readInvestigatorAiConfiguration();
   await validateProviderDestination(provider);
   const controller = new AbortController();
   const server = createScanEngineServer({ secret, signal: controller.signal,
-    dependencies: { collect: (parameters, options) => collectInvestigationWithConfig(parameters, provider, options), explain: (report, options) => runInvestigatorWithConfig(report, ai, { fetch: globalThis.fetch, ...options }), createChatContext: (report) => createInvestigatorChatContext(report, ai, secret) },
+    dependencies: { collect: (parameters, options) => collectInvestigationWithConfig(parameters, provider, options), assess: (token, signal) => fetchSwarmAssessment(token, signal, { timeoutMs: 45_000 }), enrich: fetchOptionalProviderEnrichment, explain: (report, options) => runInvestigatorWithConfig(report, ai, { fetch: globalThis.fetch, ...options }), createChatContext: (report) => createInvestigatorChatContext(report, ai, secret) },
     validateQuestionContext: (context) => { verifyInvestigatorChatContext(context, ai, secret); },
     ask: (question, context, options) => askInvestigatorQuestion(question, context, ai, secret, { fetch: globalThis.fetch, ...options }),
   });

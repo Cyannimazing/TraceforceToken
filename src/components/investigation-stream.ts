@@ -1,4 +1,5 @@
 import { z } from "@/lib/validation";
+import { AI_RATE_LIMIT_SCAN_MESSAGE } from "@/domain/investigations/scan";
 import type { ExplainedInvestigationReport, InvestigationReport } from "@/domain/investigations/types";
 import { sameInvestigationAnalysis, validateBaseInvestigationReport, validateExplainedReport } from "@/domain/investigations/report-validation";
 
@@ -8,11 +9,11 @@ const eventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("progress"), stage: safeText(120) }).strict(),
   z.object({ type: z.literal("analysis"), report: z.unknown() }).strict(),
   z.object({ type: z.literal("report"), report: z.unknown(), chatContext: z.string().min(1).max(32768).regex(/^[\x21-\x7e]+$/).optional() }).strict(),
-  z.object({ type: z.literal("error"), error: safeText(240) }).strict(),
+  z.object({ type: z.literal("error"), error: safeText(240), code: z.literal("AI_RATE_LIMITED").optional() }).strict(),
 ]);
 
 export class InvestigationStreamError extends Error {
-  constructor(message = "The investigation response was incomplete or invalid. Start a fresh investigation.") { super(message); this.name = "InvestigationStreamError"; }
+  constructor(message = "The investigation response was incomplete or invalid. Start a fresh investigation.", public readonly code?: "AI_RATE_LIMITED") { super(message); this.name = "InvestigationStreamError"; }
 }
 
 async function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal) {
@@ -42,7 +43,7 @@ export async function readInvestigationStream(response: Response, options: { sig
     const parsed = eventSchema.safeParse(value);
     if (!parsed.success) throw new InvestigationStreamError();
     if (parsed.data.type === "progress") { options.onProgress(parsed.data.stage); return; }
-    if (parsed.data.type === "error") throw new InvestigationStreamError(parsed.data.error);
+    if (parsed.data.type === "error") throw new InvestigationStreamError(parsed.data.code === "AI_RATE_LIMITED" ? AI_RATE_LIMIT_SCAN_MESSAGE : parsed.data.error, parsed.data.code);
     try {
       if (parsed.data.type === "analysis") {
         if (analysis) throw new Error();

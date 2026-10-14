@@ -26,6 +26,137 @@ function fixture(overrides: Partial<HolderCollectionOptions> = {}, budget = 20) 
   return { options, requests, calls: () => calls };
 }
 const validate = (snapshot: HolderSnapshot) => validateHolderSnapshot(snapshot, { address: token, chainId: 8453, name: null, symbol: null, decimals: 18, totalSupplyRaw: maximum.toString() }, block);
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("balance batches default to serial reads and support four concurrent exact pinned reads", async () => {
+  const wallets = Array.from({ length: 8 }, (_, index) => address(index + 100));
+  for (const concurrency of [1, 4]) {
+    let active = 0, peak = 0;
+    const waiting: { wallet: Address; release(value: string): void }[] = [];
+    const amounts = new Map(wallets.map((wallet, index) => [wallet, 2n ** 200n + BigInt(index)]));
+    const source = fixture({ observedWallets: wallets, page: async () => ({ items: [], nextCursor: null }), request: async (_method, params) => {
+      const wallet = `0x${(params[0] as { data: string }).data.slice(-40)}` as Address;
+      active++; peak = Math.max(peak, active);
+      try { return await new Promise<string>((release) => waiting.push({ wallet, release })); }
+      finally { active--; }
+    } }, 30);
+    const discovery = await discoverHolderCandidates(source.options), before = structuredClone(discovery);
+    const running = verifyHolderBalances(discovery, { ...source.options, ...(concurrency === 4 ? { balanceConcurrency: 4 } : {}) });
+    for (let offset = 0; offset < wallets.length; offset += concurrency) {
+      await nextTurn();
+      assert.equal(waiting.length, concurrency);
+      assert.equal(source.requests.length, offset + concurrency, "no later batch starts before all current reads settle");
+      for (const entry of waiting.splice(0).reverse()) entry.release(word(amounts.get(entry.wallet)!));
+    }
+    const result = await running;
+    assert.equal(peak, concurrency); assert.equal(active, 0);
+    assert.equal(result.balances.status, "complete");
+    assert.deepEqual(result.holders.map((holder) => [holder.address, holder.balanceRaw]), wallets.map((wallet) => [wallet, amounts.get(wallet)!.toString()]));
+    assert.ok(source.requests.every((request) => request.method === "eth_call" && request.params[1] === "0x64" && (request.params[0] as { to: Address }).to === token));
+    assert.deepEqual(discovery, before, "parallel verification cannot alter discovery input");
+    assert.doesNotThrow(() => validate(result));
+  }
+});
+
+test("parallel balance batches cannot exceed the exact remaining shared call allocation", async () => {
+  const wallets = Array.from({ length: 8 }, (_, index) => address(index + 100));
+  const source = fixture({ balanceConcurrency: 4, observedWallets: wallets, page: async () => ({ items: [], nextCursor: null }), request: async () => word(0n) }, 3);
+  const result = await collectHolderSnapshot(source.options);
+  assert.equal(source.calls(), 3, "one discovery call leaves exactly two balance calls");
+  assert.equal(source.requests.length, 2);
+  assert.deepEqual(result.holders.map((holder) => [holder.status, holder.balanceRaw]), [
+    ["verified", "0"], ["verified", "0"], ...wallets.slice(2).map(() => ["not_examined", null]),
+  ]);
+  assert.equal(result.balances.status, "partial");
+  assert.doesNotThrow(() => validate(result));
+});
+
+test("a throttle settles the already launched balance batch and stops every later batch", async () => {
+  const wallets = Array.from({ length: 8 }, (_, index) => address(index + 100));
+  for (const failure of [new UpstreamFailure(true, { httpStatus: 429 }), new UpstreamFailure(true, { rpcCode: -32005 }), new UpstreamFailure(true, { rpcCode: -32016 }), new UpstreamFailure(true, { rpcCode: 429 })]) {
+    let settled = 0;
+    const source = fixture({ balanceConcurrency: 4, observedWallets: wallets, page: async () => ({ items: [], nextCursor: null }), request: async (_method, params) => {
+      await nextTurn(); settled++;
+      if ((params[0] as { data: string }).data.endsWith(wallets[1].slice(2))) throw failure;
+      return word(17n);
+    } }, 30);
+    const result = await collectHolderSnapshot(source.options);
+    assert.equal(source.requests.length, 4); assert.equal(settled, 4);
+    assert.deepEqual(result.holders.map((holder) => [holder.status, holder.balanceRaw]), [
+      ["verified", "17"], ["unavailable", null], ["verified", "17"], ["verified", "17"], ...wallets.slice(4).map(() => ["not_examined", null]),
+    ]);
+    assert.equal(result.balances.verifiedWallets, 3); assert.match(result.balances.reason!, /throttling/);
+    assert.doesNotThrow(() => validate(result));
+  }
+});
+
+test("ordinary unavailable reads preserve null and allow later balance batches without inventing zero", async () => {
+  const wallets = Array.from({ length: 8 }, (_, index) => address(index + 100));
+  const source = fixture({ balanceConcurrency: 4, observedWallets: wallets, page: async () => ({ items: [], nextCursor: null }), request: async (_method, params) => {
+    if ((params[0] as { data: string }).data.endsWith(wallets[0].slice(2))) throw new UpstreamFailure();
+    return word(0n);
+  } }, 30);
+  const result = await collectHolderSnapshot(source.options);
+  assert.equal(source.requests.length, 8); assert.equal(result.holders[0].balanceRaw, null); assert.equal(result.holders[0].status, "unavailable");
+  assert.ok(result.holders.slice(1).every((holder) => holder.status === "verified" && holder.balanceRaw === "0"));
+  assert.equal(result.balances.status, "partial"); assert.doesNotThrow(() => validate(result));
+});
+
+test("a denied balance budget settles its bounded batch but starts no additional requests", async () => {
+  const wallets = Array.from({ length: 8 }, (_, index) => address(index + 100));
+  const source = fixture({ balanceConcurrency: 4, observedWallets: wallets, page: async () => ({ items: [], nextCursor: null }), request: async (_method, params) => {
+    if ((params[0] as { data: string }).data.endsWith(wallets[1].slice(2))) throw new ProviderBudgetError();
+    return word(1n);
+  } }, 30);
+  const result = await collectHolderSnapshot(source.options);
+  assert.equal(source.requests.length, 4); assert.equal(result.balances.verifiedWallets, 3);
+  assert.equal(result.holders[1].status, "unavailable");
+  assert.ok(result.holders.slice(4).every((holder) => holder.status === "not_examined" && holder.balanceRaw === null));
+  assert.doesNotThrow(() => validate(result));
+});
+
+test("malformed and unknown balance failures settle launched reads then reject without later batches", async () => {
+  const wallets = Array.from({ length: 8 }, (_, index) => address(index + 100));
+  for (const failure of [undefined, new Error("Synthetic terminal balance failure")]) {
+    const waiting: ((value: string) => void)[] = [];
+    const source = fixture({ balanceConcurrency: 4, observedWallets: wallets, page: async () => ({ items: [], nextCursor: null }), request: async (_method, params) => {
+      if ((params[0] as { data: string }).data.endsWith(wallets[0].slice(2))) { if (failure) throw failure; return "0x01"; }
+      return new Promise<string>((resolve) => waiting.push(resolve));
+    } }, 30);
+    const discovery = await discoverHolderCandidates(source.options), before = structuredClone(discovery);
+    const running = verifyHolderBalances(discovery, source.options); let settled = false;
+    void running.then(() => { settled = true; }, () => { settled = true; });
+    await nextTurn(); assert.equal(waiting.length, 3); assert.equal(settled, false);
+    for (const release of waiting) release(word(1n));
+    await assert.rejects(running, (error: unknown) => failure ? error === failure : error instanceof ProviderIntegrityError);
+    assert.equal(source.requests.length, 4); assert.deepEqual(discovery, before);
+  }
+});
+
+test("parent cancellation aborts the launched balance batch and prevents later work or publication", async () => {
+  const controller = new AbortController(), reason = new Error("Synthetic balance batch cancellation");
+  const wallets = Array.from({ length: 8 }, (_, index) => address(index + 100));
+  let aborted = 0;
+  const source = fixture({ balanceConcurrency: 4, signal: controller.signal, observedWallets: wallets, page: async () => ({ items: [], nextCursor: null }), request: async () => new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener("abort", () => { aborted++; reject(controller.signal.reason); }, { once: true });
+  }) }, 30);
+  const discovery = await discoverHolderCandidates(source.options), before = structuredClone(discovery);
+  const running = verifyHolderBalances(discovery, source.options);
+  await nextTurn(); assert.equal(source.requests.length, 4); controller.abort(reason);
+  await assert.rejects(running, (error: unknown) => error === reason);
+  assert.equal(aborted, 4); assert.equal(source.requests.length, 4); assert.deepEqual(discovery, before);
+});
+
+test("parallel reads retain exact uint256 and final total-supply checks and reject invalid concurrency", async () => {
+  const source = fixture({ balanceConcurrency: 4, observedWallets: [A, B], request: async (_method, params) => (params[0] as { data: string }).data.endsWith(A.slice(2)) ? word(maximum) : word(1n) });
+  await assert.rejects(collectHolderSnapshot(source.options), ProviderIntegrityError);
+  assert.equal(source.requests.length, 2);
+  for (const concurrency of [0, 5, 1.5, NaN, Infinity]) {
+    const invalid = fixture(), discovery = await discoverHolderCandidates(invalid.options);
+    await assert.rejects(verifyHolderBalances(discovery, { ...invalid.options, balanceConcurrency: concurrency }), RangeError);
+    assert.equal(invalid.requests.length, 0);
+  }
+});
 
 test("two-stage holder discovery makes no balance calls and later verification never rediscovers pages", async () => {
   let pages = 0;
@@ -41,6 +172,30 @@ test("two-stage holder discovery makes no balance calls and later verification n
   assert.equal(snapshot.balances.status, "complete");
   assert.deepEqual(discovery, before, "verification must not mutate the pending discovery result");
   assert.deepEqual(validate(snapshot), snapshot);
+});
+
+test("external-only candidates remain external and do not inflate indexed discovery or manufacture observed activity", async () => {
+  const source = fixture({ observedWallets: [A], externalWallets: [B, C, A], page: async () => ({ items: [{ address: A }, { address: B }], nextCursor: null }) });
+  const discovery = await discoverHolderCandidates(source.options);
+  assert.deepEqual(discovery.snapshot.holders.map((holder) => [holder.address, holder.discoveredBy]), [[A, "both"], [B, "indexed"], [C, "external"]]);
+  assert.equal(discovery.snapshot.discovery.addresses, 2);
+  assert.equal(discovery.snapshot.discovery.finalizedCensus, false);
+  const verified = await verifyHolderBalances(discovery, source.options);
+  assert.equal(verified.holders.find((holder) => holder.address === C)?.discoveredBy, "external");
+  assert.equal(verified.holders.find((holder) => holder.address === C)?.balanceRaw, "10");
+  assert.doesNotThrow(() => validate(verified));
+  const forged = structuredClone(verified); forged.discovery.addresses++;
+  assert.throws(() => validate(forged), /Inconsistent pinned holder snapshot/);
+});
+
+test("external lead balance verification cannot upgrade an unavailable holder index into complete discovery", async () => {
+  const source = fixture({ observedWallets: [], externalWallets: [C], page: async () => { throw new UpstreamFailure(); } });
+  const discovery = await discoverHolderCandidates(source.options);
+  assert.equal(discovery.snapshot.discovery.status, "unavailable"); assert.equal(discovery.snapshot.discovery.addresses, 0);
+  assert.equal(discovery.snapshot.holders[0].discoveredBy, "external");
+  const verified = await verifyHolderBalances(discovery, source.options);
+  assert.equal(verified.discovery.status, "unavailable"); assert.equal(verified.balances.status, "complete");
+  assert.equal(verified.discovery.finalizedCensus, false); assert.doesNotThrow(() => validate(verified));
 });
 
 test("delayed balance verification respects the remaining budget after prioritized work", async () => {

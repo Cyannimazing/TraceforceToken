@@ -9,6 +9,10 @@ export class TokenContractNotFoundError extends Error {
 export class ProviderBudgetError extends Error {
   constructor() { super("The configured provider call budget was exhausted."); this.name = "ProviderBudgetError"; }
 }
+/** Owned acquisition deadline; separate from provider integrity and caller cancellation. */
+export class ProviderDeadlineError extends Error {
+  constructor() { super("Blockchain acquisition exceeded its deadline."); this.name = "ProviderDeadlineError"; }
+}
 export class UpstreamFailure extends Error {
   readonly rpcCode?: number;
   readonly httpStatus?: number;

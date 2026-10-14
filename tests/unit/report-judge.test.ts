@@ -9,7 +9,7 @@ test("a real synthetic DANGER assessment exposes each supported category deducti
   const before = structuredClone(assessment);
   assert.equal(assessment.band, "DANGER");
   const result = deriveDecisionXray(assessment);
-  assert.equal(result.modelId, "traceforce-rules-1.3.0");
+  assert.equal(result.modelId, "traceforce-rules-1.4.0");
   assert.equal(result.base, 100);
   assert.deepEqual(result.rows.map(({ id, label, points, offset }) => ({ id, label, points, offset })), [
     { id: "swarm", label: "Swarm", points: 30, offset: 0 },

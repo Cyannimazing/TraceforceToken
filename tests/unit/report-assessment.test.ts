@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { assessInvestigationReport } from "../../src/domain/investigations/report-assessment";
 import { analyzeInvestigation } from "../../src/domain/investigations/analyze";
 import { validateExplainedReport } from "../../src/domain/investigations/report-validation";
-import type { Address, EvidenceRecord, ExplainedInvestigationReport, Hash, HolderSnapshot } from "../../src/domain/investigations/types";
+import type { Address, EvidenceRecord, ExplainedInvestigationReport, Hash, HolderSnapshot, InvestigationReport } from "../../src/domain/investigations/types";
 import { browserFixture, getBrowserReportFixture, getBrowserWalletFlagsFixture } from "../fixtures/report";
 import { deriveHolderTableDistribution } from "../../src/domain/investigations/holder-table-distribution";
 import { exactPercent } from "../../src/domain/investigations/report-distribution";
@@ -37,6 +37,69 @@ function withEvidence(evidence: EvidenceRecord[]): ExplainedInvestigationReport 
 function linkedSales(): ExplainedInvestigationReport {
   return withEvidence([...getBrowserReportFixture().evidence, ...sale(200, 301, browserFixture.walletA), ...sale(230, 302, browserFixture.walletB)]);
 }
+
+/** Fully acquired synthetic pool history with thirty dispersed buyers. */
+function cleanAssessmentFixture(): InvestigationReport {
+  const original = getBrowserWalletFlagsFixture(), report = structuredClone(original);
+  const pool = browserFixture.pool, creator = browserFixture.funder;
+  const purchases = report.evidence.filter((event) => event.purchase);
+  const received = purchases[1], paid = report.evidence.find((event) => event.transactionHash === received.transactionHash && event.id !== received.id)!;
+  const buyers = Array.from({ length: 30 }, (_, index) => address(1000 + index));
+  report.evidence = report.evidence.filter((event) => event.kind !== "funding" && !event.purchase && !purchases.some((buy) => buy.transactionHash === event.transactionHash));
+  report.evidence.find((event) => event.from === address(0) && event.to === creator)!.amountRaw = "1000000";
+  report.evidence.find((event) => event.liquidity)!.amountRaw = "999000";
+  for (const [index, buyer] of buyers.entries()) {
+    const common = { blockNumber: String(100 + index), blockHash: hash(100 + index), transactionHash: hash(9000 + index), timestamp: browserFixture.timestamp + 200 + index };
+    const outgoing = { ...paid, ...common, id: `clean-paid-${index}`, from: buyer };
+    const incoming = { ...received, ...common, id: `clean-received-${index}`, to: buyer, amountRaw: "3300", purchase: { ...received.purchase!, supportingEvidenceIds: [outgoing.id, `clean-received-${index}`] } };
+    report.evidence.push(outgoing, incoming);
+  }
+  const participants = [creator, ...buyers];
+  report.token.totalSupplyRaw = report.holderSnapshot!.totalSupplyRaw = "1000000";
+  report.holderSnapshot!.holders = [...participants.map((wallet) => ({ address: wallet, balanceRaw: wallet === creator ? "1000" : "3300", status: "verified" as const, discoveredBy: "indexed" as const })), { address: pool, balanceRaw: "900000", status: "verified", discoveredBy: "indexed" }];
+  report.holderSnapshot!.discovery.addresses = participants.length + 1;
+  report.holderSnapshot!.balances.requestedWallets = report.holderSnapshot!.balances.verifiedWallets = participants.length + 1;
+  report.walletActivitySnapshot!.rows = participants.map((wallet) => ({ address: wallet, outgoingTransactionCountRaw: "100", code: "eoa" }));
+  report.liquiditySnapshot!.reserve0Raw = "900000"; report.liquiditySnapshot!.reserve1Raw = "5000";
+  report.coverage.eligibleWallets = report.coverage.examinedWallets = participants.length;
+  report.coverage.funding = participants.map((wallet) => ({ wallet, status: "complete", fromBlock: "0", toBlock: "400", internalTransfers: "not_examined", reason: "Synthetic completed external-native search." }));
+  report.token.securitySnapshot!.checks = ["is_honeypot", "owner_change_balance", "transfer_pausable"].map((id) => ({ id: id as "is_honeypot" | "owner_change_balance" | "transfer_pausable", value: "no" }));
+  report.token.marketSnapshot = { source: "dexscreener", status: "reported", checkedAt: report.generatedAt, sourceUrl: `https://api.dexscreener.com/token-pairs/v1/base/${report.token.address}`, pairAddress: pool, priceUsd: "0.005", liquidityUsd: 100000, marketCapUsd: 5000, volume24hUsd: 3000, priceChange24hPercent: null, pairCreatedAt: null };
+  return analyzeInvestigation({ token: report.token, range: report.range, evidence: report.evidence, coverage: report.coverage, pools: report.infrastructure!.pools, hubs: report.infrastructure!.hubs,
+    holderSnapshot: report.holderSnapshot, walletActivitySnapshot: report.walletActivitySnapshot, liquiditySnapshot: report.liquiditySnapshot }, { id: report.id, generatedAt: report.generatedAt });
+}
+
+test("completed checks without a supported concern can return a qualified OK outcome", () => {
+  const assessment = assessInvestigationReport(cleanAssessmentFixture());
+  assert.equal(assessment.complete, true);
+  assert.deepEqual(assessment.missingChecks, []);
+  assert.equal(assessment.verdict, "OK");
+  assert.equal(assessment.band, "CLEAN");
+  assert.ok(assessment.categories.every((category) => category.status === "measured"));
+  assert.match(assessment.limitations.join(" "), /not measured probabilities/);
+});
+
+test("missing market or contract checks cannot produce OK even with all category credits measured", () => {
+  for (const missing of ["market", "contract"] as const) {
+    const report = cleanAssessmentFixture();
+    if (missing === "market") delete report.token.marketSnapshot;
+    else report.token.securitySnapshot!.checks = [];
+    const assessment = assessInvestigationReport(report);
+    assert.equal(assessment.assessedPossiblePoints, 100);
+    assert.equal(assessment.complete, false);
+    assert.ok(assessment.missingChecks.length > 0);
+    assert.equal(assessment.verdict, "INSUFFICIENT");
+  }
+});
+
+test("an entry on another trading venue cannot earn favorable Snipers absence credits", () => {
+  const report = cleanAssessmentFixture(), buy = report.evidence.find((event) => event.purchase)!;
+  buy.purchase!.protocol = "uniswap-v3";
+  const assessment = assessInvestigationReport(report);
+  assert.equal(assessment.categories.find((category) => category.id === "snipers")!.points, null);
+  assert.equal(assessment.complete, false);
+  assert.notEqual(assessment.verdict, "OK");
+});
 
 function withBalances(report: ExplainedInvestigationReport, supply: string | null, entries: { address: Address; balanceRaw: string | null }[]): ExplainedInvestigationReport {
   const value = structuredClone(report);
@@ -208,7 +271,7 @@ test("fresh uses acquired outgoing counts and missing counts stay unknown", () =
 test("measured categories earn positive credits while incomplete funding cannot earn Insider credits", () => {
   const report = getBrowserWalletFlagsFixture();
   const complete = assessInvestigationReport(report);
-  assert.equal(complete.version, "1.3.0");
+  assert.equal(complete.version, "1.4.0");
   assert.equal(complete.metrics.freshWalletsPercent, "0.00");
   assert.equal(complete.categories.find((row) => row.id === "fresh")!.points, 20);
   assert.ok(complete.categories.find((row) => row.id === "insiders")!.points! > 0);
@@ -296,6 +359,28 @@ test("warning proof deductions agree with positive category credits instead of s
   assert.equal(category.points, 7);
   assert.equal(assessment.triggeredRules.find((rule) => rule.id === "creator-holding")!.deductedPoints, 3);
   assert.equal(assessment.gates.find((gate) => gate.id === "creator-holding")!.severity, "soft");
+  assert.equal(assessment.gates.find((gate) => gate.id === "creator-holding")!.label, "Creator holds 12.12% of float");
+  assert.equal(assessment.triggeredRules.find((rule) => rule.id === "creator-holding")!.label, "Creator holding is at least 10% of float");
+});
+
+test("creator warnings name their actual share basis when pool exclusions or total-supply fallback differ", () => {
+  for (const [poolBalance, denominator, share, label] of [["7", "993", "85.39", "float"], [null, "1000", "84.80", "total supply"]] as const) {
+    const report = withBalances(getBrowserReportFixture(), "1000", [
+      { address: browserFixture.funder, balanceRaw: "848" },
+      { address: browserFixture.walletA, balanceRaw: "125" },
+      { address: browserFixture.walletB, balanceRaw: "20" },
+      { address: browserFixture.pool, balanceRaw: poolBalance },
+    ]);
+    report.token.securitySnapshot = { source: "goplus", status: "reported", checkedAt: report.generatedAt,
+      sourceUrl: `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=${report.token.address}`,
+      tokenAddress: report.token.address, chainId: 8453, holderCount: 4, creatorAddress: browserFixture.funder, checks: [] };
+    const assessment = assessInvestigationReport(report);
+    assert.equal(assessment.holdingBasis.denominatorRaw, denominator);
+    assert.equal(assessment.metrics.creatorSharePercent, share);
+    assert.equal(assessment.gates.find((gate) => gate.id === "creator-holding")!.label, `Creator holds ${share}% of ${label}`);
+    assert.equal(assessment.triggeredRules.find((rule) => rule.id === "creator-holding")!.label, `Creator holding is at least 10% of ${label}`);
+    assert.equal(exactPercent(848n, 1000n), "84.80", "the same holding's total-supply share remains distinct from pool-excluded float");
+  }
 });
 
 test("an empty noncreator Fresh population cannot earn favorable points from a zero denominator", () => {

@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { assessInvestigationReport } from "../../src/domain/investigations/report-assessment";
 import { browserFixture, getBrowserWalletFlagsFixture } from "../fixtures/report";
-import { expectedDecisionWeights } from "../fixtures/decision-weights";
+
 import { analyzeInvestigation } from "../../src/domain/investigations/analyze";
 import { validateExplainedReport } from "../../src/domain/investigations/report-validation";
 import type { Hash } from "../../src/domain/investigations/types";
@@ -22,6 +22,7 @@ async function openSyntheticReport(page: Page, report = getBrowserWalletFlagsFix
   await page.getByLabel("Base token contract").fill(browserFixture.token);
   await page.getByRole("button", { name: "Start investigation", exact: true }).click();
   await expect(page.getByRole("region", { name: "Score", exact: true })).toBeVisible();
+  await expect(page.locator(".traceforce-report")).not.toContainText(/balanceRaw|[0-9]+ raw token units/);
   return report;
 }
 
@@ -45,7 +46,7 @@ async function assertContained(panel: Locator) {
 test("compact score, verdict and gauge keep real values readable with details folded on desktop and mobile", async ({ page }) => {
   const report = await openSyntheticReport(page), assessment = assessInvestigationReport(report);
   const gauge = page.getByRole("region", { name: "Score", exact: true });
-  const verdict = page.getByRole("region", { name: "VERDICT OUTPUT", exact: true });
+  const verdict = page.getByRole("region", { name: "Important checks", exact: true });
   const score = page.getByRole("region", { name: "Score breakdown", exact: true });
   const categories = score.getByLabel("Category scores", { exact: true });
   await expect(categories.locator("[data-category-id]")).toHaveCount(6);
@@ -60,23 +61,11 @@ test("compact score, verdict and gauge keep real values readable with details fo
     await expect(fill).toHaveCount(category.points !== null && category.points > 0 ? 1 : 0);
     if (category.points !== null && category.points > 0) expect(Number(await fill.getAttribute("width"))).toBeCloseTo(category.points / category.possiblePoints * 100, 8);
   }
-  const decisionWeights = verdict.getByLabel("Verdict decision weights", { exact: true });
-  await expect(decisionWeights.locator("dt")).toHaveText(["avoid", "caution", "ok"]);
-  const expected = expectedDecisionWeights(assessment), displayed = await decisionWeights.locator("dd").allTextContents();
-  expect(displayed.reduce((sum, value) => sum + Math.round(parseFloat(value) * 10), 0)).toBe(1000);
-  for (const [index, weight] of Object.values(expected.weights).entries()) {
-    expect(Math.abs(parseFloat(displayed[index]) / 100 - weight)).toBeLessThanOrEqual(0.001);
-    const bar = decisionWeights.locator("dd").nth(index).locator("svg rect").nth(1);
-    expect(Number(await bar.getAttribute("width"))).toBeCloseTo(weight * 100, 8);
-  }
-  const xray = verdict.getByRole("region", { name: "DECISION X-RAY", exact: true });
-  const total = xray.locator("[data-total-mass]");
-  expect(Number(await total.getAttribute("data-total-mass"))).toBeCloseTo(expected.total, 10);
-  expect(Number(await total.getAttribute("data-selected-mass"))).toBeCloseTo(expected.masses.avoid, 10);
-  await expect(verdict.getByText("AVOID", { exact: true }).first()).toBeVisible();
-  await expect(verdict.getByLabel("Verdict receipt", { exact: true })).not.toBeVisible();
-  await expect(gauge.locator("details > summary")).toHaveText(["Details"]);
-  await expect(score.locator("details > summary")).toHaveText(["Details"]);
+  await expect(verdict.getByText(assessment.verdict, { exact: true })).toBeVisible();
+  await expect(verdict).toHaveAttribute("data-verdict", assessment.verdict);
+  await expect(verdict.locator("pre")).toHaveCount(0);
+  await expect(verdict.getByLabel("Verdict receipt", { exact: true })).toHaveCount(0);  await expect(gauge.locator("details > summary")).toHaveText(["What the score means"]);
+  await expect(score.locator("details > summary")).toHaveText(["What was checked"]);
   const scoreDetails = score.locator("details[data-score-details]");
   await expect(scoreDetails).toHaveJSProperty("open", false);
   const measurements: { width: number; gauge: number; verdict: number; score: number }[] = [];
@@ -113,15 +102,15 @@ test("compact score, verdict and gauge keep real values readable with details fo
   await writeFile(".artifacts/compact-report/measurements.json", JSON.stringify({
     synthetic: true, assessmentVersion: assessment.version, displayedScore: assessment.displayedScore,
     earnedPoints: assessment.assessedPoints, scoreRange: assessment.scoreRange,
-    decisionWeights: expected.weights, measurements,
+    measurements,
   }, null, 2));
   const summary = scoreDetails.locator("summary").first();
   await summary.focus(); await page.keyboard.press("Enter");
   await expect(scoreDetails).toHaveJSProperty("open", true);
   for (const category of assessment.categories.filter((category) => category.points === null)) {
     const details = scoreDetails.locator(`[data-category-details="${category.id}"]`);
-    await expect(details).toContainText(`Earned points: 0/${category.possiblePoints} · not assessed`);
-    await expect(details).toContainText(category.metric === null ? "Measurement unavailable" : "numeric score not established");
+    await expect(details).toContainText("Not fully assessed; the result remains unknown.");
+    await expect(details).toContainText(category.metric ?? "This check could not be completed.");
   }
   expect(await page.evaluate(() => (window as unknown as { __compactReportCsp: string[] }).__compactReportCsp)).toEqual([]);
 });

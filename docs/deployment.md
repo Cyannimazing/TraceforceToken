@@ -13,7 +13,7 @@ Use a patched Node.js 22 or 24 LTS release and the committed lockfile. Node.js 2
 
 Generated local secrets stay in ignored .env.local. The existing application/test databases received migrations 0000–0003 on MariaDB 10.4.32. Public execution uses only anonymous visitor counters and expiring scan leases; legacy schema remains for compatibility.
 
-Configure an approved Base RPC and the required specialist through [local AI setup](local-ai.md). Start private Ollama and the reviewed named traceforce-investigator model, then:
+Configure an approved Base RPC and the investigator through [AI setup](local-ai.md). For free OpenRouter, set `INVESTIGATOR_AI_PROVIDER=openrouter`, your private `OPENROUTER_API_KEY`, `OPENROUTER_MODEL=openrouter/free` and `OPENROUTER_FREE_ONLY=true`. No Gemini key or local model is needed for that explicit selection. Zero prompt/completion/request price ceilings and no paid cloud fallback enforce the free-only request policy. Restart after changing the environment, then:
 
     npm run dev
 
@@ -27,7 +27,7 @@ Each anonymous browser visitor has a combined 30 scan/question requests per 30-s
 | --- | --- | --- |
 | Vercel | Next.js pages, validation, visitor admission, protected engine proxy | SITE_URL, RATE_LIMIT_SECRET, verified-TLS DATABASE_URL, engine URL/secret |
 | Shared MySQL/MariaDB | Anonymous short-window counters and expiring scan leases | Restricted admission/runtime access; separate migration account |
-| Hostinger KVM 2 | One stateless Node engine beside private Ollama | Provider/model settings and SCAN_ENGINE_SECRET; no DB credentials |
+| Hostinger KVM 2 | One stateless Node engine, with private Ollama for local inference | Provider/model settings, optional cloud AI keys and SCAN_ENGINE_SECRET; no DB credentials |
 | Visitor browser | Current report/chat; explicit optional IndexedDB snapshots | Validated result and short-lived signed context; no infrastructure secret |
 
 An optional [one-VPS cohosting profile](../deploy/linux/cohost/README.md) places quota-only MySQL Community 8.4 LTS on the same KVM 2 as the engine and Ollama. Next.js stays on Vercel; the engine still receives no DB credentials. Its separate drop-ins budget 4608 MiB for Ollama, 768 MiB for the engine and 768 MiB for MySQL (6 GiB combined), with lower aggregate CPU ceilings and explicit OS/proxy headroom. This is prepared configuration, not a measured fit or deployed system. Direct Vercel-to-MySQL access remains gated on certificate/hostname-verified TLS, narrow runtime grants and reviewed fixed-egress firewall rules; Vercel Static IPs are paid Pro/Enterprise functionality. No additional database hosting plan is inherently required, but connectivity costs are separate. [Vercel Static IPs](https://vercel.com/docs/networking/static-ips)
@@ -44,6 +44,10 @@ An optional `BASE_LOG_RPC_URL` belongs in the engine environment only. It select
 
 [deploy/vercel.env.example](../deploy/vercel.env.example) is the server-only Vercel environment inventory; [worker.env.example](../deploy/linux/worker.env.example) is the separate engine inventory. Keep filled copies outside the release/source tree in a private secret store. Do not upload local `.env.local`: it includes local database, migration/test, retired cron and provider/model settings that do not belong in Vercel. Secrets must be entered for the intended project/environment rather than bundled into client assets.
 
+With free-only OpenRouter configured, `INVESTIGATOR_AI_PROVIDER=auto` tries configured local → free OpenRouter and excludes Gemini. Explicit `openrouter` provides the no-payment setup even while other keys are present; missing/free-limited access fails rather than switching to a paid provider. Paid OpenRouter requires deliberate `OPENROUTER_FREE_ONLY=false`, and explicit Gemini is a separate opt-in. Cloud credentials belong on the protected engine, never the Vercel web tier or under `NEXT_PUBLIC_`. A genuine pinned NVIDIA free-model trial passed one synthetic report and greeting/cited funding chat with zero recorded API cost; [exact scope, privacy override and limits](local-ai.md#provider-selection-and-openrouter-setup). This does not verify live-chain accuracy or hosted operation.
+
+Runtime cloud selection does not replace the prepared Linux/Ollama service layout. The existing worker unit still wants and orders itself after Ollama, and resource examples remain based on local inference. A cloud-only deployment needs a separate review of its units, resource allocation and outbound HTTPS access; this change neither installs nor verifies that deployment.
+
 The [offline preflight](../deploy/preflight.ts) reuses the application's configuration readers and adds checks for the prepared hosting split. Load only the intended private environment explicitly; it never reads local env files on its own:
 
 ```bash
@@ -52,11 +56,13 @@ node --env-file=/secure/operator/engine.env --import tsx deploy/preflight.ts --t
 node --import tsx --test deploy/preflight.test.ts
 ```
 
-It prints static pass/fail descriptions, performs no network/inference/database actions and exits 1 for invalid configuration. Vercel checks simulate production/Vercel flags, require a public HTTPS origin/engine, verified remote DB TLS, separated credentials and an explicit one- or two-connection pool for the cohost budget. Engine checks reject DB/quota credentials, remote inference and resource settings outside the prepared CPU profile. Configuration readiness is separate from actual account/project access, schema/grants, TLS, networking, effective systemd settings and host capacity; those remain explicitly unverified in the output.
+It prints static pass/fail descriptions, performs no network/inference/database actions and exits 1 for invalid configuration. Vercel checks simulate production/Vercel flags, require a public HTTPS origin/engine, verified remote DB TLS, separated credentials and an explicit one- or two-connection pool for the cohost budget. Engine checks reject DB/quota credentials and invalid selected-provider configuration; the prepared CPU restrictions still apply when local inference is selected. Passing with a cloud key does not establish account access, credits or structured-output compatibility. Configuration readiness is separate from actual account/project access, schema/grants, TLS, networking, effective systemd settings and host capacity; those remain explicitly unverified in the output.
 
 The **2026-10-12 workstation audit** found Node/npm/SSH/SCP available, no Vercel CLI or local project link, and no SSH host aliases. Local engine/provider/AI/quota settings are present, but a remote engine URL/secret is absent. Running the preflight against the local environment correctly rejected hosted configuration without printing values. These observations do not prove whether external accounts/resources exist; no authenticated cloud target was supplied or accessed.
 
 For direct Vercel-to-VPS MySQL, the fixed-egress gate has a material cost: the current Static IPs documentation lists **$100/month per project on Pro plus regional Private Data Transfer**. It is not included merely by choosing Pro. An alternative HTTPS quota boundary would need separate implementation/review; opening MySQL to all IPs or weakening TLS is not a substitute. [Current Static IP documentation](https://vercel.com/docs/networking/static-ips)
+
+`OPENROUTER_ALLOW_DATA_COLLECTION=false` is the default template policy. An operator-approved `true` permits OpenRouter providers that may retain/use supplied context, questions and responses, including training. Restart the engine after changing it. This does not alter free-only price filters or evidence guards and does not update OpenRouter's separate account-level Free model training setting. Review [data-use configuration](local-ai.md#provider-selection-and-openrouter-setup); approval alone does not verify the account setting or live workflow.
 
 ## Capacity, time, and resources
 
@@ -65,14 +71,14 @@ One process permits up to three active operations, overlapping acquisition, and 
 | Boundary | Configured budget |
 | --- | --- |
 | Scan engine | 270 seconds, including AI waiting |
-| Provider collection / local AI | 120 seconds each |
+| Provider collection / selected AI attempts | 120 seconds each; AI attempts share one deadline |
 | Next.js remote scan proxy | 285 seconds; route maxDuration 300 |
 | Questions | Engine/local 135 seconds; remote proxy 140; route maxDuration 150 |
 | Payload | 2 KiB scan request; 48 KiB question request; 8 MiB report; 16 MiB stream |
 
 Configured duration is not proof that a hosting plan/reverse proxy permits that lifetime. Verify real streaming termination, disconnect propagation, buffering, and platform limits. [Vercel duration configuration](https://vercel.com/docs/functions/configuring-functions/duration)
 
-The planned two-vCPU/8-GB KVM host uses qwen3:4b-instruct-2507-q4_K_M through profile 1.4.0, two threads, zero GPU layers, and a 4,096-token context. Ollama is cloud-off, parallel=1, loaded-models=1. The engine-only profile has memory ceilings of 5500 MiB for Ollama and 768 MiB for the engine, with a 384-MiB JS heap. Its combined ceilings are approximately 6.57 decimal GB; MySQL is excluded from that profile. CPU quotas of 175%/25% are ceilings, not reserved cores. The separate cohosting profile above replaces those limits when adding MySQL; neither profile budgets a Next.js build or additional model. Actual MemTotal/process peaks must be measured. [Ollama runtime settings](https://docs.ollama.com/faq)
+The planned two-vCPU/8-GB KVM host uses qwen3:4b-instruct-2507-q4_K_M through profile 1.5.0, two threads, zero GPU layers, and a 4,096-token context. Ollama is cloud-off, parallel=1, loaded-models=1. The engine-only profile has memory ceilings of 5500 MiB for Ollama and 768 MiB for the engine, with a 384-MiB JS heap. Its combined ceilings are approximately 6.57 decimal GB; MySQL is excluded from that profile. CPU quotas of 175%/25% are ceilings, not reserved cores. The separate cohosting profile above replaces those limits when adding MySQL; neither profile budgets a Next.js build or additional model. Actual MemTotal/process peaks must be measured. [Ollama runtime settings](https://docs.ollama.com/faq)
 
 No CPU latency or sustained throughput is promised. Cold/warm inference, waiting, model memory, SIGTERM/disconnect, throttling and out-of-memory behavior need tests on the actual VPS before changing deadlines.
 

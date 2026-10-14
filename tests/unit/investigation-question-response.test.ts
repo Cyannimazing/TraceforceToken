@@ -12,6 +12,16 @@ test("question responses retain known citations and reject invented, duplicate, 
 test("question response bytes are bounded and safe server errors remain readable", async () => {
   await assert.rejects(readInvestigationAnswer(new Response("x".repeat(65537)), new Set(), signal()), /could not be validated/);
   await assert.rejects(readInvestigationAnswer(Response.json({ error: "This question session has expired. Run a fresh scan." }, { status: 410 }), new Set(), signal()), /session has expired/);
+  for (const source of [
+    { error: "The AI service is temporarily unavailable. Try again shortly.", code: "AI_UNAVAILABLE" },
+    { error: "The AI answer could not be verified. Try rephrasing your question about this scan.", code: "AI_RESPONSE_UNVERIFIED" },
+    { error: "The AI provider has reached its request limit. Wait for it to reset before trying again.", code: "AI_RATE_LIMITED" },
+  ]) await assert.rejects(readInvestigationAnswer(Response.json(source, { status: 503, headers: { "cache-control": "private, no-store" } }), new Set(), signal()), (error: unknown) => error instanceof Error && error.message === source.error);
+  for (const source of [
+    { error: "Untrusted details must not become public copy.", code: "UNRECOGNIZED_PROVIDER_ERROR" },
+    { error: "Untrusted details must not become public copy.", code: "AI_RESPONSE_UNVERIFIED", providerBody: "untrusted diagnostics" },
+    { error: "Untrusted details must not become public copy.", code: "AI_RATE_LIMITED", providerBody: "untrusted diagnostics" },
+  ]) await assert.rejects(readInvestigationAnswer(Response.json(source, { status: 503 }), new Set(), signal()), /Questions are temporarily unavailable/);
   await assert.rejects(readInvestigationAnswer(Response.json({ error: "bad\u0000text" }, { status: 503 }), new Set(), signal()), /temporarily unavailable/);
 });
 test("cancellation closes a stalled question-response stream", async () => {

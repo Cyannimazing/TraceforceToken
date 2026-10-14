@@ -11,6 +11,7 @@ import { Button as MovingBorderButton } from "./ui/moving-border";
 import { BentoGridItem } from "./ui/bento-grid";
 import { GlowingEffect } from "./ui/glowing-effect";
 
+const readableAnswer = (value: string) => value.replace(/0x[0-9a-fA-F]{64}/g, (reference) => `${reference.slice(0, 10)}…${reference.slice(-4)}`).replace(/0x[0-9a-fA-F]{40}/g, (address) => `${address.slice(0, 6)}…${address.slice(-4)}`);
 type Exchange = { id: number; question: string } & (
   | { status: "pending" }
   | { status: "answered"; response: InvestigationAnswer }
@@ -59,7 +60,7 @@ export function InvestigationChat({ report, context, onReveal, onFreshScan }: { 
     <div className="relative flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border bg-background/40 px-4 py-4 sm:px-6">
       <div className="flex min-w-0 items-center gap-3">
         <span className="flex size-11 shrink-0 items-center justify-center rounded-lg border border-accent/30 bg-accent/10 text-accent"><Bot size={23} strokeWidth={1.5} aria-hidden="true" /></span>
-        <div className="min-w-0"><p className="mb-1 font-mono text-[10px] tracking-[0.18em] text-accent">TRACEFORCE / AI</p><h2 id="questions-title" className="text-sm font-semibold tracking-tight sm:text-base">Questions about this token</h2></div>
+        <div className="min-w-0"><p className="mb-1 font-mono text-[10px] tracking-[0.18em] text-accent">TRACEFORGE / AI</p><h2 id="questions-title" className="text-sm font-semibold tracking-tight sm:text-base">Questions about this token</h2></div>
       </div>
       {exchanges.length > 0 && <button type="button" disabled={busy} onClick={() => { setExchanges([]); composer.current?.focus({ preventScroll: true }); }} className="inline-flex min-h-11 items-center gap-2 rounded-lg px-2 text-xs text-muted transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"><RotateCcw size={13} aria-hidden="true" />Clear conversation</button>}
     </div>
@@ -74,20 +75,21 @@ export function InvestigationChat({ report, context, onReveal, onFreshScan }: { 
         </div>}
         <ol aria-label="Questions and answers" aria-live="polite" className="space-y-7">{exchanges.map((exchange) => <li key={exchange.id} className="space-y-4">
           <div className="ml-auto max-w-[90%] rounded-xl rounded-tr-md border border-border bg-foreground/5 px-4 py-3 sm:max-w-[75%] sm:px-5"><p className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-muted">You</p><p className="whitespace-pre-wrap break-words text-base leading-7 sm:text-[15px]">{exchange.question}</p></div>
-          <div className="flex items-start gap-2.5 sm:gap-3">
-            <span className={`mt-1 flex size-8 shrink-0 items-center justify-center rounded-xl border ${exchange.status === "failed" ? "border-amber/30 bg-amber/10 text-amber" : "border-accent/30 bg-accent/10 text-accent"}`}><Bot size={17} strokeWidth={1.5} aria-hidden="true" /></span>
-            <div className={`min-w-0 max-w-[calc(100%_-_42px)] rounded-xl rounded-tl-md border px-4 py-4 sm:max-w-[85%] sm:px-5 ${exchange.status === "failed" ? "border-amber/30 bg-amber/5" : "border-accent/20 bg-background/70"}`}>
-              <p className={`mb-2 font-mono text-[10px] uppercase tracking-[0.16em] ${exchange.status === "failed" ? "text-amber" : "text-accent"}`}>{exchange.status === "failed" ? "Response unavailable" : "TraceForce AI"}{exchange.status === "answered" && exchange.response.model && <span aria-label={`Response model ${exchange.response.model}`} className="ml-2 break-all font-normal normal-case tracking-normal text-muted">{exchange.response.model}</span>}</p>
-              {exchange.status === "pending" ? <div role="status" className="flex min-h-9 items-center gap-4 text-sm leading-7 text-muted"><span aria-hidden="true" className="flex h-8 items-center text-accent">{reduceMotion ? <Activity size={20} /> : <LoaderOne />}</span><span>Reading report…</span></div> : exchange.status === "failed" ? <>
-                <p role="alert" className="break-words text-base leading-7 sm:text-[15px]">{exchange.error}</p><button type="button" disabled={busy} onClick={() => void send(exchange.question, exchange.id)} className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-lg border border-amber/25 px-3 text-xs text-amber transition-colors hover:bg-amber/10 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"><RotateCcw size={13} aria-hidden="true" />Retry question</button>
-              </> : <>
-                <p className="whitespace-pre-wrap break-words text-base leading-7 sm:text-[15px]">{exchange.response.answer}</p>
-                {exchange.response.caveat && <p className="mt-4 border-l border-amber/50 pl-3 text-sm leading-6 text-muted">{exchange.response.caveat}</p>}
+          {exchange.status === "failed" ? <div role="alert" aria-label="Request not completed" data-chat-failure="true" className="border-l-2 border-amber/40 pl-4 text-xs leading-6 text-muted">
+            <p className="font-medium text-foreground">Request not completed</p><p className="mt-1 break-words">{exchange.error}</p>
+            <button type="button" disabled={busy} onClick={() => void send(exchange.question, exchange.id)} className="mt-2 inline-flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 text-xs text-foreground transition-colors hover:bg-foreground/5 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"><RotateCcw size={13} aria-hidden="true" />Retry question</button>
+          </div> : <div className="flex items-start gap-2.5 sm:gap-3" data-chat-assistant={exchange.status === "answered" ? "true" : undefined}>
+            <span data-chat-avatar="true" className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-xl border border-accent/30 bg-accent/10 text-accent"><Bot size={17} strokeWidth={1.5} aria-hidden="true" /></span>
+            <div className="min-w-0 max-w-[calc(100%_-_42px)] rounded-xl rounded-tl-md border border-accent/20 bg-background/70 px-4 py-4 sm:max-w-[85%] sm:px-5">
+              <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.16em] text-accent">TraceForge AI</p>
+              {exchange.status === "pending" ? <div role="status" className="flex min-h-9 items-center gap-4 text-sm leading-7 text-muted"><span aria-hidden="true" className="flex h-8 items-center text-accent">{reduceMotion ? <Activity size={20} /> : <LoaderOne />}</span><span>Reading report…</span></div> : <>
+                <p data-chat-answer="true" className="whitespace-pre-wrap break-words text-base leading-7 sm:text-[15px]">{readableAnswer(exchange.response.answer)}</p>
+                {exchange.response.caveat && <p className="mt-4 border-l border-amber/50 pl-3 text-sm leading-6 text-muted">{readableAnswer(exchange.response.caveat)}</p>}
                 {exchange.response.evidenceIds.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{exchange.response.evidenceIds.map((id, index) => <a key={id} href={`#evidence-${encodeURIComponent(id)}`} onClick={() => onReveal(id)} className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-amber/25 bg-amber/5 px-3 font-mono text-[11px] text-amber transition-colors hover:border-amber/50 hover:bg-amber/10 focus-visible:outline-accent"><Link2 size={12} aria-hidden="true" />Evidence {index + 1}<ArrowUpRight size={12} aria-hidden="true" /></a>)}</div>}
                 {exchange.response.needsFreshScan && <button type="button" onClick={onFreshScan} className="mt-3 inline-flex min-h-11 items-center gap-2 text-xs text-accent underline underline-offset-4 focus-visible:outline-accent">Run a fresh scan<ArrowUpRight size={14} aria-hidden="true" /></button>}
               </>}
             </div>
-          </div>
+          </div>}
         </li>)}</ol>
         <div ref={conversationEnd} />
       </div>

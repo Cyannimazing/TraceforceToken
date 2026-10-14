@@ -7,6 +7,7 @@ import { collectSqdFundingWindow, type SqdFundingPageQuery } from "./sqd-funding
 import { discoverHolderCandidates, verifyHolderBalances, type HolderCollectionOptions, type HolderDiscoveryPage, type HolderDiscoveryResult } from "./holders";
 import type { TokenTransferPage, TokenTransferPageReader } from "./alchemy-transfers";
 import { collectCreatorFunding } from "./creator-funding";
+import { collectExitQuote } from "./exit-quote";
 export { ProviderBudgetError, ProviderIntegrityError, UpstreamFailure } from "./errors";
 
 /** Official Base deployment, checked against Uniswap's Base deployments documentation. */
@@ -49,7 +50,7 @@ const fundingPageSchema = z.object({
   nextCursor: z.record(z.string().min(1).max(40), z.union([z.string().max(512), z.number().int().nonnegative().safe()])).refine((cursor) => Object.keys(cursor).length <= 8).nullable(),
 });
 const tokenTransferPageSchema = z.object({
-  items: z.array(z.object({ hash: hashSchema, blockNumber: z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(24) })).max(100),
+  items: z.array(z.object({ hash: hashSchema, blockNumber: z.string().regex(/^(?:0|[1-9][0-9]*)$/).max(24) })).max(1000),
   nextCursor: z.string().regex(/^[A-Za-z0-9._:-]{1,256}$/).nullable(),
 });
 export interface CollectorLimits { logChunkSize: number; maxTransferLogs: number; callBudget: number; fundingMaxPages: number; nativeFundingMaxBlocks: number }
@@ -65,6 +66,9 @@ export interface CollectorDependencies {
   fundingIndexSource?: "alchemy";
   /** One source-reported selected pair, authenticated through its supported factory. */
   poolCandidates?: () => Promise<readonly Address[]>;
+  /** Third-party addresses are discovery leads only; state and receipts must
+   * establish their actual holdings/activity at our pinned block. */
+  candidateAddresses?: () => Promise<readonly Address[]>;
   /** Advance a configured endpoint without I/O; every subsequent read is counted here. */
   recoverRpc?: () => boolean;
   /** Static public provider label; never a configured URL or credential. */
@@ -465,7 +469,7 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
     }
   }
   }
-  const poolCache = new Map<Address, { token0: Address; token1: Address; factory: Address; protocol: "uniswap-v2" | "uniswap-v3" } | null>();
+  const poolCache = new Map<Address, { token0: Address; token1: Address; factory: Address; protocol: "uniswap-v2" | "uniswap-v3"; feePips: number } | null>();
   const poolAttempts = new Set<Address>();
   async function authenticatePool(address: Address, block: string) {
     if (poolCache.has(address)) return poolCache.get(address) ?? null;
@@ -480,14 +484,16 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
       const token0 = parsed(addressSchema, await read("token0")); const token1 = parsed(addressSchema, await read("token1"));
       if (token0 === token1 || ![token0, token1].includes(input.token)) { poolCache.set(address, null); return null; }
       let actual: Address;
+      let feePips = 3000;
       if (factory === BASE_V2_FACTORY) actual = parsed(addressSchema, decodeFunctionResult({ abi: poolAbi, functionName: "getPair", data: await call(factory, encodeFunctionData({ abi: poolAbi, functionName: "getPair", args: [token0, token1] }), block) }));
       else {
         const fee = Number(await read("fee"));
-        if (!Number.isInteger(fee) || fee <= 0 || fee >= 1_000_000) { poolCache.set(address, null); return null; }
+        if (!Number.isInteger(fee) || fee < 0 || fee >= 1_000_000) { poolCache.set(address, null); return null; }
+        feePips = fee;
         actual = parsed(addressSchema, decodeFunctionResult({ abi: poolAbi, functionName: "getPool", data: await call(factory, encodeFunctionData({ abi: poolAbi, functionName: "getPool", args: [token0, token1, fee] }), block) }));
       }
       if (actual !== address) { poolCache.set(address, null); return null; }
-      const result = { token0, token1, factory, protocol: factory === BASE_V2_FACTORY ? "uniswap-v2" as const : "uniswap-v3" as const }; poolCache.set(address, result); pools.add(address); hubs.add(address); return result;
+      const result = { token0, token1, factory, feePips, protocol: factory === BASE_V2_FACTORY ? "uniswap-v2" as const : "uniswap-v3" as const }; poolCache.set(address, result); pools.add(address); hubs.add(address); return result;
     } catch (error) { checkAbort(); if (error instanceof ProviderIntegrityError) throw error; warnings.add("Some pool contracts could not be authenticated; their activity remains unclassified and unknown pool addresses may remain in observed relationships."); return null; }
   }
   const transferReceipts = [...receiptCache.values()];
@@ -635,6 +641,13 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
   }
   }
   const observedWallets = [...new Set([...evidence.values()].filter((record) => record.kind === "transfer" && record.assetAddress === input.token).flatMap((record) => [record.from, record.to]).concat(verifiedCreation ? [verifiedCreation.value.creator] : []))].filter((wallet) => wallet !== ZERO).sort();
+  let externalWallets: Address[] = [];
+  if (dependencies.candidateAddresses) {
+    const leads = parsed(z.array(addressSchema).max(512), await dependencies.candidateAddresses());
+    checkAbort();
+    externalWallets = [...new Set(leads)].filter((lead) => lead !== ZERO && !observedWallets.includes(lead)).sort();
+    if (leads.length) warnings.add("External provider addresses are discovery leads only. Their balances and account types require pinned RPC checks; source labels and relationships do not establish ownership or complete holder coverage.");
+  }
   let holderSnapshot: InvestigationDataset["holderSnapshot"];
   let holderDiscovery: HolderDiscoveryResult | undefined;
   let holderOptions: HolderCollectionOptions | undefined;
@@ -643,7 +656,7 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
     const snapshotCeiling = calls + Math.floor(Math.max(0, limits.callBudget - calls - 1) / 3);
     phaseCeiling = snapshotCeiling;
     holderOptions = {
-      token: input.token, totalSupplyRaw: typeof supply === "bigint" ? supply.toString() : null, block: to, observedWallets, observedAt,
+      token: input.token, totalSupplyRaw: typeof supply === "bigint" ? supply.toString() : null, block: to, observedWallets, externalWallets, observedAt,
       sourceUrl: dependencies.holderSourceUrl?.(input.token),
       provider: dependencies.holderProvider,
       indexIndependentOfRpc: dependencies.holderIndexIndependentOfRpc,
@@ -678,14 +691,25 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
       warnings.add("The funding-phase fallback verification could not complete; the RPC throttle remains active and optional acquisition stays incomplete.");
     }
   }
-  const candidates = [...new Set([...observedWallets, ...(holderSnapshot?.holders.map((item) => item.address) ?? [])])].filter((wallet) => wallet !== ZERO && !hubs.has(wallet)).sort();
+  // Source addresses influence examination order only; their identity, holdings
+  // and funding still require the same pinned reads and canonical proofs.
+  const priorityCandidates = new Set(holderSnapshot?.holders.filter((item) => item.discoveredBy !== "observed").map((item) => item.address) ?? []);
+  const candidatePriority = (wallet: Address) => wallet === verifiedCreation?.value.creator ? 0 : priorityCandidates.has(wallet) ? 1 : 2;
+  const candidates = [...new Set([...observedWallets, ...externalWallets, ...(holderSnapshot?.holders.map((item) => item.address) ?? [])])].filter((wallet) => wallet !== ZERO && !hubs.has(wallet))
+    .sort((left, right) => candidatePriority(left) - candidatePriority(right) || left.localeCompare(right));
   const walletActivitySnapshot: NonNullable<InvestigationDataset["walletActivitySnapshot"]> = { block: to, rows: [] };
   // Keep the cheap pinned classification ahead of variable funding pagination.
   // Its fixed allocation still leaves the majority for evidence acquisition.
   const activityRemaining = Math.max(0, limits.callBudget - calls - 1);
   const pendingBalances = holderDiscovery?.snapshot.holders.length ?? 0;
   const pendingTradeReads = Math.min(40, 2 * transferReceipts.filter((receipt) => receipt.logs.some((log) => [SWAP_TOPIC, V2_SWAP_TOPIC].includes(log.topics[0]))).length);
-  const activityAllocation = Math.max(0, activityRemaining - Math.floor(activityRemaining * 3 / 4) - pendingBalances - pendingTradeReads);
+  const denseCandidateCohort = pendingBalances > activityRemaining;
+  // Reserving one balance read for every discovered address can exceed the
+  // entire budget after a distribution and starve both of the preceding phases.
+  // Preserve bounded shares for classification and funding in that case; every
+  // unreached address remains eligible and explicitly unexamined.
+  const activityAllocation = denseCandidateCohort ? Math.floor(activityRemaining / 8)
+    : Math.max(0, activityRemaining - Math.floor(activityRemaining * 3 / 4) - pendingBalances - pendingTradeReads);
   phaseCeiling = calls + Math.min(50, activityAllocation);
   for (const wallet of candidates.slice(0, 2000)) {
     let code: "eoa" | "contract" | "unavailable" = walletCode.get(wallet) ?? "unavailable";
@@ -699,7 +723,9 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
     walletActivitySnapshot.rows.push({ address: wallet, outgoingTransactionCountRaw, code });
   }
   const fundingRemaining = Math.max(0, limits.callBudget - calls - 1);
-  phaseCeiling = calls + Math.max(0, Math.min(Math.floor(fundingRemaining * 3 / 4), fundingRemaining - pendingBalances - pendingTradeReads));
+  phaseCeiling = calls + (denseCandidateCohort ? Math.min(50, Math.floor(fundingRemaining / 8))
+    : Math.max(0, Math.min(Math.floor(fundingRemaining * 3 / 4), fundingRemaining - pendingBalances - pendingTradeReads)));
+  if (denseCandidateCohort) warnings.add("The discovered address cohort exceeds the remaining call budget. Separate bounded allocations preserve wallet classification, funding, balances and the final canonical check; unreached addresses remain unexamined.");
   const funding: WalletFundingCoverage[] = [];
   let creatorFunding: InvestigationDataset["coverage"]["creatorFunding"];
   // A creator with a short outbound history can establish this narrow source
@@ -844,8 +870,15 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
     if (!record) continue;
     for (const wallet of [record.from, record.to]) if (wallet !== ZERO) tradeBalanceCandidates.add(wallet);
   }
-  phaseCeiling = calls + Math.max(0, tradeRemaining - tradeBalanceCandidates.size);
+  const selectedExitPool = selectedPairs.find((address) => address !== ZERO) ?? null;
+  let authenticatedExitPool = selectedExitPool ? poolCache.get(selectedExitPool) ?? null : null;
+  // Reserve only when every pending balance plus the three V3 reads can fit.
+  // The final canonical recheck is already excluded from tradeRemaining.
+  const exitQuoteReserve = !rpcThrottle && authenticatedExitPool?.protocol === "uniswap-v3"
+    && tradeRemaining >= tradeBalanceCandidates.size + 3 ? 3 : 0;
+  phaseCeiling = calls + Math.max(0, tradeRemaining - tradeBalanceCandidates.size - exitQuoteReserve);
   await collectSales();
+  authenticatedExitPool = selectedExitPool ? poolCache.get(selectedExitPool) ?? null : null;
   // Infrastructure is authenticated after the funding priority phase. Exclude
   // it from wallet coverage and remove funding-to-infrastructure observations
   // together, keeping every retained funding event backed by its coverage row.
@@ -877,22 +910,56 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
     }
     holderDiscovery = { ...holderDiscovery, snapshot: { ...holderDiscovery.snapshot, holders: [...pendingHolders.values()].sort((left, right) => left.address.localeCompare(right.address)), balances: { ...holderDiscovery.snapshot.balances, status: pendingHolders.size ? "not_examined" : holderDiscovery.snapshot.balances.status, requestedWallets: pendingHolders.size } } };
     await dependencies.onProgress?.("Checking pinned holder balances after funding investigation");
-    phaseCeiling = limits.callBudget - 1;
+    phaseCeiling = limits.callBudget - 1 - exitQuoteReserve;
+    // The authenticated index lane is fixed: concurrent balance reads cannot
+    // race the primary RPC's mutable recovery/handshake state. Each individual
+    // read still consumes the shared allocation and uses the exact pinned block.
+    let balanceThrottle: UpstreamFailure | null = null;
+    const fixedBalanceRequest = dependencies.indexedRpc && indexedSourceVerified
+      ? async (method: string, params: unknown[]) => {
+        checkAbort();
+        if (method !== "eth_call") throw new ProviderIntegrityError();
+        if (balanceThrottle) throw balanceThrottle;
+        if (calls >= phaseCeiling) throw new ProviderBudgetError();
+        calls++;
+        try { return await dependencies.indexedRpc!(method, params); }
+        catch (error) { checkAbort(); if (isProviderThrottle(error)) balanceThrottle = error; throw error; }
+      } : undefined;
     holderSnapshot = await verifyHolderBalances(holderDiscovery, {
       ...holderOptions,
-      remainingCalls: () => Math.max(0, limits.callBudget - calls - 1),
-      request: (method, params) => request(method, params),
+      balanceConcurrency: fixedBalanceRequest ? 4 : 1,
+      throttleError: () => rpcThrottle ?? balanceThrottle,
+      remainingCalls: () => Math.max(0, limits.callBudget - calls - 1 - exitQuoteReserve),
+      request: fixedBalanceRequest ?? ((method, params) => request(method, params)),
     });
+    if (fixedBalanceRequest) warnings.add("Pinned holder balances used up to four concurrent read-only calls on the fixed Alchemy lane, authenticated against Base and the pinned range. Every call shares the acquisition budget; unavailable reads remain unknown.");
     if (holderSnapshot.discovery.status !== "complete" || holderSnapshot.balances.status !== "complete") warnings.add("Holder discovery or pinned balance verification is incomplete; missing balances are unknown, not zero.");
   }
   if (funding.some((item) => item.status !== "complete")) warnings.add("Funding history is not complete for every eligible participant; unexamined or unavailable wallets are listed individually.");
   phaseCeiling = limits.callBudget - 1;
   walletActivitySnapshot.rows = walletActivitySnapshot.rows.filter((row) => !hubs.has(row.address)).map((row) => row.code === "unavailable" && walletCode.has(row.address) ? { ...row, code: walletCode.get(row.address)! } : row);
   const activityAddresses = new Set(walletActivitySnapshot.rows.map((row) => row.address));
-  for (const wallet of candidates.slice(0, 2000)) if (!activityAddresses.has(wallet)) walletActivitySnapshot.rows.push({ address: wallet, outgoingTransactionCountRaw: null, code: "unavailable" });
+  // Candidate priority changes after collection. Keep every retained verified
+  // row; fill only remaining snapshot slots with explicitly unknown candidates.
+  for (const wallet of candidates) {
+    if (activityAddresses.has(wallet)) continue;
+    if (walletActivitySnapshot.rows.length >= 2000) break;
+    walletActivitySnapshot.rows.push({ address: wallet, outgoingTransactionCountRaw: null, code: "unavailable" });
+    activityAddresses.add(wallet);
+  }
   walletActivitySnapshot.rows.sort((left, right) => left.address.localeCompare(right.address));
-  if (candidates.length > 2000) warnings.add("The pinned wallet-activity row limit was reached; omitted candidates have unknown outgoing nonce and contract status.");
+  if (candidates.some((wallet) => !activityAddresses.has(wallet))) warnings.add("The pinned wallet-activity row limit was reached; omitted candidates have unknown outgoing nonce and contract status.");
   if (walletActivitySnapshot.rows.some((row) => row.code === "unavailable" || row.outgoingTransactionCountRaw === null && row.code === "eoa")) warnings.add("Some pinned wallet code or outgoing-transaction nonce reads were unavailable or budget-limited. A small outgoing nonce is not a complete activity history.");
+  await dependencies.onProgress?.("Checking the largest verified wallet's fee-aware pool exit quote");
+  const exitQuote = await collectExitQuote({
+    token: { address: input.token, chainId: 8453, name: tokenName, symbol: tokenSymbol, decimals: typeof decimals === "number" ? decimals : null, totalSupplyRaw: typeof supply === "bigint" ? supply.toString() : null },
+    block: to, observedAt, holderSnapshot, walletActivitySnapshot, selectedPool: selectedExitPool,
+    authenticatedPool: authenticatedExitPool && selectedExitPool ? { ...authenticatedExitPool, address: selectedExitPool } : null,
+    authenticatedPools: [...pools],
+    unsupportedPool: selectedExitPool !== null && poolCache.has(selectedExitPool) && poolCache.get(selectedExitPool) === null,
+    liquiditySnapshot, request: (method, params) => request(method, params),
+    remainingCalls: () => rpcThrottle ? 0 : Math.max(0, limits.callBudget - calls - 1), signal: dependencies.signal, throttleError: () => rpcThrottle,
+  });
   await dependencies.onProgress?.("Rechecking canonical finalized block identity");
   if (rpcThrottle) { warnings.add("Recognized RPC throttling stopped optional candidate checks; the mandatory canonical recheck receives a bounded one-second recovery pause."); await backoff(1000); }
   const currentEnd = blockReference(await request("eth_getBlockByNumber", [hex(toNumber), false], true));
@@ -908,5 +975,5 @@ export async function collectBaseInvestigation(parameters: ScanParameters, depen
     warnings.add(`RPC sources used for acquisition: ${[...rpcSources].join("; ")}. This is a scan-wide source set; individual evidence may require reads from more than one source.`);
   }
   completedTransferRanges.sort((left, right) => BigInt(left.fromBlock) < BigInt(right.fromBlock) ? -1 : BigInt(left.fromBlock) > BigInt(right.fromBlock) ? 1 : 0);
-  return { token: { address: input.token, chainId: 8453, name: tokenName, symbol: tokenSymbol, decimals: typeof decimals === "number" ? decimals : null, totalSupplyRaw: typeof supply === "bigint" ? supply.toString() : null }, range: { from, to, finality: "finalized" }, evidence: orderedEvidence, pools: [...pools].sort(), hubs: [...hubs].sort(), ...(holderSnapshot ? { holderSnapshot } : {}), walletActivitySnapshot, ...(liquiditySnapshot ? { liquiditySnapshot } : {}), coverage: { transfers: transfersStatus, transferCrawl: { scope: input.scope, source: dependencies.transferPage ? "alchemy-transfers" : "rpc-logs", completedRanges: completedTransferRanges }, funding, ...(creatorFunding ? { creatorFunding } : {}), eligibleWallets: candidates.length, examinedWallets, warnings: [...warnings] } };
+  return { token: { address: input.token, chainId: 8453, name: tokenName, symbol: tokenSymbol, decimals: typeof decimals === "number" ? decimals : null, totalSupplyRaw: typeof supply === "bigint" ? supply.toString() : null }, range: { from, to, finality: "finalized" }, evidence: orderedEvidence, pools: [...pools].sort(), hubs: [...hubs].sort(), ...(holderSnapshot ? { holderSnapshot } : {}), walletActivitySnapshot, ...(liquiditySnapshot ? { liquiditySnapshot } : {}), exitQuote, coverage: { transfers: transfersStatus, transferCrawl: { scope: input.scope, source: dependencies.transferPage ? "alchemy-transfers" : "rpc-logs", completedRanges: completedTransferRanges }, funding, ...(creatorFunding ? { creatorFunding } : {}), eligibleWallets: candidates.length, examinedWallets, warnings: [...warnings] } };
 }

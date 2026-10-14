@@ -6,6 +6,8 @@ import { verifyInvestigatorChatContext, askInvestigatorQuestion } from "@/agents
 import { questionAnswerSchema, type InvestigationAnswer, type InvestigationChatMessage } from "@/domain/investigations/questions";
 import { getScanCapacity } from "@/services/scan-capacity";
 import { createDeadline } from "@/lib/deadline";
+import { z } from "@/lib/validation";
+import { InvestigationQuestionError } from "@/agents/questions";
 import { HttpError } from "@/lib/http";
 import { boundedJson } from "@/providers/base/transport";
 import { validateScanEngineDestination } from "./scan-proxy";
@@ -23,6 +25,15 @@ export function prepareQuestionExecution(): (question: string, context: string, 
       if (response.status === 400) throw new HttpError(400, "Ask a question within this scan's scope using its current question context.");
       if (response.status === 410) throw new HttpError(410, "This scan's chat context is unavailable or expired. Run a fresh scan.");
       if (response.redirected || response.headers.get("content-type")?.split(";", 1)[0] !== "application/json") throw new Error("Invalid question response.");
+      if (response.status === 503) {
+        // Only the fixed trusted engine code crosses this boundary. Its error
+        // prose is never copied into the public reply; the route supplies copy.
+        const failure = z.object({ error: z.string().min(1).max(240), code: z.literal("AI_RATE_LIMITED") }).strict()
+          .safeParse(await boundedJson(new Response(response.body, { headers: { "content-type": "application/json" } }), 4096));
+        deadline.signal.throwIfAborted();
+        if (failure.success) throw new InvestigationQuestionError("RATE_LIMITED");
+        throw new Error("The question service is unavailable.");
+      }
       const answer = questionAnswerSchema.parse(await boundedJson(response, 65536));
       deadline.signal.throwIfAborted();
       return answer;

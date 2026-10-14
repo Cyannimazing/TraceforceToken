@@ -25,7 +25,7 @@ const resultSchema = z.object({
     hash: hashSchema,
     category: z.literal("erc20"),
     rawContract: z.object({ address: addressSchema }),
-  })).max(100),
+  })).max(1000),
   pageKey: z.union([cursorSchema, z.literal(""), z.null()]).optional(),
 });
 
@@ -40,7 +40,7 @@ export function createAlchemyTransferPageReader(rpc: (method: string, params: un
     const raw = await rpc("alchemy_getAssetTransfers", [{
       fromBlock: `0x${BigInt(fromBlock).toString(16)}`, toBlock: `0x${BigInt(toBlock).toString(16)}`,
       contractAddresses: [token], category: ["erc20"], order: "asc", excludeZeroValue: false,
-      withMetadata: false, maxCount: "0x64", ...(cursor ? { pageKey: cursor } : {}),
+      withMetadata: false, maxCount: "0x3e8", ...(cursor ? { pageKey: cursor } : {}),
     }]);
     const result = resultSchema.safeParse(raw);
     if (!result.success) throw new ProviderIntegrityError("The indexed token-transfer page was malformed.");

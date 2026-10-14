@@ -1,16 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowRight, ChevronRight, Download, FolderOpen, HardDrive, Layers3, Network, Radio, Save, Search, ShieldCheck, Square, Trash2, Wallet, X, Zap } from "lucide-react";
+import { ArrowRight, ChevronRight, Download, FolderOpen, HardDrive, Layers3, LoaderCircle, Network, Radio, Save, Search, ShieldCheck, Square, Trash2, Wallet, X, Zap } from "lucide-react";
 import type { ExplainedInvestigationReport, InvestigationReport } from "@/domain/investigations/types";
 import { DEFAULT_LOOKBACK_BLOCKS } from "@/domain/investigations/scan-defaults";
+import { AI_RATE_LIMIT_SCAN_MESSAGE } from "@/domain/investigations/scan";
 import { InvestigationReportView } from "./investigation-report";
 import { InvestigationStreamError, readInvestigationStream } from "./investigation-stream";
 import { BrowserReportStorageError, clearBrowserReports, listBrowserReports, openBrowserReport, removeBrowserReport, saveBrowserReport, type BrowserReportSummary } from "./browser-reports";
-import { BackgroundBeamsWithCollision } from "./ui/background-beams-with-collision";
-import { Spotlight } from "./ui/spotlight";
 import { GlowingEffect } from "./ui/glowing-effect";
-import { Button as MovingBorderButton } from "./ui/moving-border";
 import { useTraceMotion } from "./ui/motion-preferences";
 import { BentoGridItem } from "./ui/bento-grid";
 
@@ -20,13 +18,57 @@ type CurrentResult = { report: ExplainedInvestigationReport; chatContext?: strin
 type AnalysisPreview = { report: InvestigationReport; revision: number };
 const date = (value: string) => new Date(value).toLocaleString();
 
+export type ScanProgressStage = "starting" | "history" | "funding" | "checking" | "analyzing" | "waiting" | "explaining" | "investigating";
+const scanProgressCopy: Record<ScanProgressStage, { title: string; detail: string }> = {
+  starting: { title: "Checking the token", detail: "Getting the information needed for your report." },
+  history: { title: "Checking wallet activity", detail: "Looking at how tokens moved between wallets." },
+  funding: { title: "Checking where the money came from", detail: "Looking at how the wallets received money." },
+  checking: { title: "Checking balances and trades", detail: "Checking who holds the token and how it has been traded." },
+  analyzing: { title: "Putting the findings together", detail: "Reviewing wallet connections and warning signs." },
+  waiting: { title: "Preparing your report", detail: "Waiting for the final review." },
+  explaining: { title: "Finishing your report", detail: "Turning the findings into a clear explanation." },
+  investigating: { title: "Checking the token", detail: "Reviewing the available information." },
+};
+
+/** Display known phases without copying provider counters or technical prose. */
+export function getScanProgressStage(message: string): ScanProgressStage {
+  if (/^Waiting for the AI explanation slot/i.test(message)) return "waiting";
+  if (/^(?:AI reviewing|Writing the plain English investigation explanation)/i.test(message)) return "explaining";
+  if (/^Analyzing the freshly collected evidence/i.test(message)) return "analyzing";
+  if (/^Tracing observed native funding/i.test(message)) return "funding";
+  if (/^(?:Verifying authenticated market|Checking pinned holder balances|Checking the largest verified wallet|Rechecking canonical finalized)/i.test(message)) return "checking";
+  if (/^(?:Crawling Base token history|Collecting and verifying token transfers|Base token crawl:|Discovering holder candidates)/i.test(message)) return "history";
+  if (/^(?:Starting a fresh|Pinning the finalized|Checking source-reported token metadata)/i.test(message)) return "starting";
+  return "investigating";
+}
+
+function ScanLoadingStatus({ stage, effectsActive, compact }: { stage: ScanProgressStage; effectsActive: boolean; compact: boolean }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    const started = performance.now();
+    const timer = window.setInterval(() => setElapsedSeconds(Math.floor((performance.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const copy = scanProgressCopy[stage];
+  const elapsed = `${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, "0")}`;
+  return <div data-scan-progress data-scan-stage={stage} className="mt-5 rounded-xl border border-accent/20 bg-background/85 p-4 sm:p-5">
+    <div className="flex flex-wrap items-center justify-between gap-2"><p className="engine-kicker">Working on your report</p><span role="timer" aria-live="off" data-scan-elapsed className="whitespace-nowrap font-mono text-xs tabular-nums text-muted">Time so far <time dateTime={`PT${elapsedSeconds}S`}>{elapsed}</time></span></div>
+    <div className="mt-3 flex items-start gap-3">
+      <span role="progressbar" aria-label="Investigation in progress" aria-valuetext={copy.title} className="mt-0.5 shrink-0 text-accent"><LoaderCircle size={20} className={effectsActive ? "animate-spin" : undefined} aria-hidden="true" /></span>
+      <div role="status" aria-live="polite" aria-atomic="true" className="min-w-0"><p className="text-sm font-semibold text-foreground">{copy.title}</p><p className="mt-1 text-sm leading-6 text-muted">{copy.detail}</p></div>
+    </div>
+    {!compact && <p className="mt-3 text-xs leading-6 text-muted">Keep this page open. You can cancel at any time.</p>}
+  </div>;
+}
+
 export function InvestigationWorkbench({ initialToken = "" }: { initialToken?: string }) {
   const { active: effectsActive } = useTraceMotion();
   const active = useRef<AbortController | null>(null), resultTitle = useRef<HTMLHeadingElement>(null), tokenInput = useRef<HTMLInputElement>(null), formRef = useRef<HTMLFormElement>(null);
   const mounted = useRef(false), revision = useRef(0), analysisId = useRef<string | null>(null), downloadUrls = useRef(new Set<string>());
-  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [stages, setStages] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [scanStage, setScanStage] = useState<ScanProgressStage>("starting");
   const [current, setCurrent] = useState<CurrentResult | null>(null), [snapshots, setSnapshots] = useState<BrowserReportSummary[]>([]);
   const [preview, setPreview] = useState<AnalysisPreview | null>(null);
+  const [aiRateLimited, setAiRateLimited] = useState(false);
   const [scope, setScope] = useState<"full" | "window">("full");
   const displayed = current ?? preview;
   const [storageBusy, setStorageBusy] = useState(false), [storageError, setStorageError] = useState(""), [storageMessage, setStorageMessage] = useState("");
@@ -43,19 +85,20 @@ export function InvestigationWorkbench({ initialToken = "" }: { initialToken?: s
     analysisId.current = null;
     setCurrent({ ...result, revision: samePreview ? revision.current : ++revision.current });
     setPreview(null);
+    setAiRateLimited(false);
     if (!samePreview) requestAnimationFrame(() => resultTitle.current?.focus());
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     active.current?.abort(); const controller = new AbortController(); active.current = controller;
     analysisId.current = null;
-    setBusy(true); setError(""); setCurrent(null); setPreview(null); setStorageMessage(""); setStages(["Starting a fresh Base investigation"]);
+    setBusy(true); setError(""); setAiRateLimited(false); setCurrent(null); setPreview(null); setStorageMessage(""); setScanStage("starting");
     const deadline = setTimeout(() => controller.abort(new DOMException("Investigation timed out", "TimeoutError")), 295_000);
     try {
       const response = await fetch("/api/investigations", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" }, cache: "no-store", signal: controller.signal, body: JSON.stringify({ token: String(form.get("token")).trim(), scope, lookbackBlocks: scope === "window" ? Number(form.get("lookbackBlocks")) : DEFAULT_LOOKBACK_BLOCKS }) });
       const result = await readInvestigationStream(response, {
         signal: controller.signal,
-        onProgress: (stage) => { if (active.current === controller) setStages((previous) => previous.at(-1) === stage ? previous : [...previous.slice(-19), stage]); },
+        onProgress: (stage) => { if (active.current === controller) setScanStage(getScanProgressStage(stage)); },
         onAnalysis: (report) => {
           if (active.current !== controller) return;
           analysisId.current = report.id;
@@ -64,10 +107,12 @@ export function InvestigationWorkbench({ initialToken = "" }: { initialToken?: s
         },
       });
       if (active.current !== controller) return;
-      showResult(result); setStages([]);
+      showResult(result);
     } catch (caught) {
       if (active.current !== controller) return;
-      setError(controller.signal.aborted ? (controller.signal.reason?.name === "TimeoutError" ? "The investigation took too long. Start a fresh investigation." : "Investigation cancelled. Start again to collect fresh data.") : caught instanceof InvestigationStreamError ? caught.message : "The investigation could not complete. Please try again."); setStages([]);
+      const quotaReached = !controller.signal.aborted && caught instanceof InvestigationStreamError && caught.code === "AI_RATE_LIMITED";
+      setAiRateLimited(quotaReached);
+      setError(quotaReached ? AI_RATE_LIMIT_SCAN_MESSAGE : controller.signal.aborted ? (controller.signal.reason?.name === "TimeoutError" ? "The investigation took too long. Start a fresh investigation." : "Investigation cancelled. Start again to collect fresh data.") : caught instanceof InvestigationStreamError ? caught.message : "The investigation could not complete. Please try again.");
     } finally { clearTimeout(deadline); if (active.current === controller) { active.current = null; setBusy(false); } }
   }
 
@@ -76,7 +121,7 @@ export function InvestigationWorkbench({ initialToken = "" }: { initialToken?: s
     if (tokenInput.current) tokenInput.current.value = displayed.report.token.address;
     formRef.current?.requestSubmit();
   }
-  function clearResult() { active.current?.abort(); analysisId.current = null; setCurrent(null); setPreview(null); setStages([]); setStorageMessage(""); tokenInput.current?.focus(); }
+  function clearResult() { active.current?.abort(); analysisId.current = null; setCurrent(null); setPreview(null); if (aiRateLimited) setError(""); setAiRateLimited(false); setStorageMessage(""); tokenInput.current?.focus(); }
   async function storageAction(action: () => Promise<void>) {
     setStorageBusy(true); setStorageError(""); setStorageMessage("");
     try { await action(); const rows = await listBrowserReports(); if (mounted.current) setSnapshots(rows); }
@@ -103,7 +148,6 @@ export function InvestigationWorkbench({ initialToken = "" }: { initialToken?: s
 
   return <div className="flex min-w-0 flex-col gap-4 sm:gap-6">
     <BentoGridItem as="section" id="investigation-form" aria-labelledby="scan-title" className="order-1 isolate scroll-mt-40 sm:scroll-mt-28">
-      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true"><Spotlight className="-top-40 left-0 opacity-50" fill="var(--accent)" /><BackgroundBeamsWithCollision compact className="absolute inset-0 h-full w-full" /></div>
       <div className="relative z-[2] px-5 pt-7 pb-6 sm:px-9 sm:pt-10 lg:px-11">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2"><p className="engine-kicker flex items-center gap-2 text-accent"><span className="size-1.5 rounded-full bg-accent" />BASE TOKEN INTELLIGENCE</p><span className="font-mono text-[10px] tracking-wider text-muted">FRESH READS / PUBLIC EVIDENCE</span></div>
         <div className="mt-5 grid gap-6 lg:grid-cols-[1.3fr_1fr] lg:items-end lg:gap-12">
@@ -113,19 +157,16 @@ export function InvestigationWorkbench({ initialToken = "" }: { initialToken?: s
         <div className="engine-scan-panel relative mt-8 rounded-xl border border-border p-4 sm:p-6">
           <GlowingEffect spread={35} glow disabled={false} proximity={80} inactiveZone={0.2} borderWidth={1} />
           <form ref={formRef} onSubmit={submit} aria-busy={busy} className="relative">
-            <div className="flex flex-wrap items-center justify-between gap-2"><label className="flex items-center gap-2 text-sm font-semibold" htmlFor="token-address"><Search size={16} className="text-accent" aria-hidden="true" />Base token contract</label><span className="font-mono text-[10px] tracking-wider text-muted">ERC-20 / 8453</span></div>
-            <div className="mt-1 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start"><input ref={tokenInput} id="token-address" name="token" defaultValue={initialToken} required pattern="0x[0-9a-fA-F]{40}" maxLength={42} autoComplete="off" spellCheck={false} aria-describedby="token-help" placeholder="Paste a Base contract · 0x..." className={`${inputClass} min-w-0 font-mono text-base`} disabled={busy || storageBusy} /><MovingBorderButton type="submit" duration={4000} containerClassName="mt-2 h-14 w-full md:w-56 disabled:cursor-not-allowed disabled:opacity-50" className="engine-primary-fill gap-2 border-accent/50 px-5 text-sm font-semibold" disabled={busy || storageBusy}>{busy ? "Investigating..." : "Start investigation"}<ArrowRight size={17} aria-hidden="true" /></MovingBorderButton></div>
-            <p id="token-help" className="mt-3 text-xs leading-6 text-muted">Fresh full crawl from Base genesis through the finalized block. Your report shows completed ranges and any remaining gaps.</p>
+            <div className="flex flex-wrap items-center justify-between gap-2"><label className="flex items-center gap-2 text-sm font-semibold" htmlFor="token-address"><Search size={16} className="text-accent" aria-hidden="true" />Base token contract</label><span className="text-[11px] text-muted">Public records only</span></div>
+            <div className="mt-1 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start"><input ref={tokenInput} id="token-address" name="token" defaultValue={initialToken} required pattern="0x[0-9a-fA-F]{40}" maxLength={42} autoComplete="off" spellCheck={false} aria-describedby="token-help" placeholder="Paste a Base contract · 0x..." className={`${inputClass} min-w-0 font-mono text-base`} disabled={busy || storageBusy} /><button type="submit" className="engine-button engine-button-primary tf-scan-submit mt-2 h-14 w-full gap-2 px-6 md:w-56" disabled={busy || storageBusy}>{busy ? "Investigating..." : "Start investigation"}<ArrowRight size={17} aria-hidden="true" /></button></div>
+            <p id="token-help" className="mt-3 text-xs leading-6 text-muted">Get a clear assessment, the main reasons and supporting evidence. Incomplete checks stay visible.</p>
+            <p className="mt-1 text-[11px] leading-6 text-muted">Uses external data providers. SWARM may publish the scanned token and its result. <a href="https://swarmengine.tech/privacy" target="_blank" rel="noopener noreferrer nofollow" className="underline underline-offset-4">Source privacy</a></p>
             <div className="mt-2 flex flex-wrap items-start justify-between gap-3"><details className="min-w-0"><summary className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted">Scan settings<ChevronRight size={13} aria-hidden="true" /></summary><div className="max-w-sm pb-3"><label className="block text-xs font-semibold" htmlFor="scan-scope">History scope</label><select id="scan-scope" name="scope" value={scope} onChange={(event) => setScope(event.target.value as "full" | "window")} className={inputClass} disabled={busy || storageBusy}><option value="full">Full crawl · all token history</option><option value="window">Recent block window</option></select>{scope === "window" && <><label className="mt-4 block text-xs font-semibold" htmlFor="lookback-blocks">History window (blocks)</label><input id="lookback-blocks" name="lookbackBlocks" type="number" min={100} max={20000} step={1} defaultValue={DEFAULT_LOOKBACK_BLOCKS} required className={inputClass} disabled={busy || storageBusy} /></>}<p className="mt-2 text-xs leading-6 text-muted">All discovered wallets are eligible. A full crawl is complete only when every requested range has been processed; provider, record and time limits remain visible.</p></div></details>{busy && <button type="button" className={secondaryButtonClass} onClick={() => active.current?.abort()}><Square size={13} aria-hidden="true" />Cancel investigation</button>}</div>
           </form>
         </div>
         {!busy && !current && <div className="mt-6 grid grid-cols-2 gap-4 text-xs leading-6 text-muted lg:grid-cols-4">{[{ icon: Wallet, text: "Who funded the wallets?" }, { icon: Network, text: "How are they connected?" }, { icon: Radio, text: "Who accumulated early?" }, { icon: Search, text: "What supports a sale?" }].map(({ icon: Icon, text }) => <div key={text} className="flex items-start gap-2"><Icon size={15} className="mt-1 shrink-0 text-accent" aria-hidden="true" /><span>{text}</span></div>)}</div>}
-        {busy && !preview && <div className="mt-6 grid overflow-hidden rounded-2xl border border-accent/20 bg-background/85 lg:grid-cols-[.7fr_1.3fr]">
-          <div className="engine-orbit-field relative flex min-h-52 items-center justify-center border-b border-border lg:border-r lg:border-b-0" aria-hidden="true"><svg viewBox="0 0 360 360" className="w-52 text-accent"><circle cx="180" cy="180" r="140" fill="none" stroke="currentColor" opacity=".12" /><circle cx="180" cy="180" r="105" fill="none" stroke="currentColor" opacity=".2" /><circle cx="180" cy="180" r="57" fill="currentColor" opacity=".04" /><g className={effectsActive ? "engine-orbit" : undefined}>{Array.from({ length: 24 }, (_, index) => { const angle = index * Math.PI * 2 / 24; return <circle key={index} cx={180 + Math.cos(angle) * (95 + index % 3 * 9)} cy={180 + Math.sin(angle) * (95 + index % 3 * 9)} r={2 + index % 3} fill="currentColor" opacity={.25 + index % 4 * .15} />; })}</g><path d="M150 180h60M180 150v60" stroke="currentColor" opacity=".4" /><circle cx="180" cy="180" r="8" fill="currentColor" /><text x="180" y="265" textAnchor="middle" fill="currentColor" fontSize="9" fontFamily="monospace" letterSpacing="3">TRACING EVIDENCE</text></svg></div>
-          <div role="status" aria-live="polite" className="min-w-0 p-5 sm:p-6"><div className="flex items-center justify-between gap-3"><p className="engine-kicker flex items-center gap-2"><Radio size={14} className="text-accent" aria-hidden="true" />Live investigation</p><span className="font-mono text-[10px] text-muted">{stages.length} updates</span></div><p className="mt-3 text-base font-medium text-foreground">Fresh crawl in progress</p><ol className="mt-4 max-h-52 space-y-3 overflow-y-auto text-xs leading-6 text-muted">{stages.map((stage, index) => <li key={`${index}-${stage}`} className="flex gap-3"><span className="shrink-0 font-mono text-accent/80">{String(index + 1).padStart(2, "0")}</span><span className={index === stages.length - 1 ? "text-foreground" : ""}>{stage}</span></li>)}</ol></div>
-        </div>}
-        {busy && preview && <p className="mt-5 flex items-center gap-2 text-sm leading-6 text-muted"><Radio size={15} className="text-accent" aria-hidden="true" />{stages.at(-1) ?? "Preparing the required AI explanation"}</p>}
-        {error && <p role="alert" className="mt-5 rounded-xl border border-copper/40 bg-copper/5 p-4 text-sm leading-7 text-foreground">{error}</p>}
+        {busy && <ScanLoadingStatus stage={scanStage} effectsActive={effectsActive} compact={Boolean(preview)} />}
+        {error && <p role="alert" data-scan-error-code={aiRateLimited ? "AI_RATE_LIMITED" : undefined} className="mt-5 rounded-xl border border-copper/40 bg-copper/5 p-4 text-sm leading-7 text-foreground">{error}</p>}
       </div><div className="engine-tracer-rule" aria-hidden="true" />
     </BentoGridItem>
     <BentoGridItem as="section" aria-labelledby="browser-reports-title" className="order-3 p-5 sm:p-6">
@@ -136,7 +177,7 @@ export function InvestigationWorkbench({ initialToken = "" }: { initialToken?: s
       {storageError && <p role="alert" className="mt-4 rounded-xl border border-copper/40 p-4 text-sm leading-7">{storageError}</p>}
     </BentoGridItem>
     {displayed && <section aria-labelledby="current-report-title" className="order-2 min-w-0 space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><h2 id="current-report-title" ref={resultTitle} tabIndex={-1} className="scroll-mt-40 font-mono text-xs uppercase tracking-widest text-muted sm:scroll-mt-28">Your investigation report</h2><div className="flex flex-wrap gap-2">{current && <><button type="button" className={secondaryButtonClass} disabled={storageBusy} onClick={saveCurrent}><Save size={14} aria-hidden="true" />Save in this browser</button><button type="button" className={secondaryButtonClass} onClick={downloadCurrent}><Download size={14} aria-hidden="true" />Download JSON</button></>}<button type="button" className={secondaryButtonClass} onClick={clearResult}><X size={14} aria-hidden="true" />Clear report</button></div></div>
-      {!current && preview && <p role="status" className="rounded-xl border border-accent/25 bg-accent/5 p-4 text-sm leading-7">{busy ? "Evidence is ready. The required AI explanation is still being prepared." : "Evidence preview only. The required AI explanation did not finish; start a fresh scan to complete the report."}</p>}
+      {!current && preview && <p role="status" data-ai-rate-limit-preview={aiRateLimited ? "true" : undefined} className="rounded-xl border border-accent/25 bg-accent/5 p-4 text-sm leading-7">{busy ? "Evidence is ready. The required AI explanation is still being prepared." : aiRateLimited ? "Evidence preview only. The AI explanation has not been generated. Wait for the AI limit to reset before trying again." : "Evidence preview only. The required AI explanation did not finish; start a fresh scan to complete the report."}</p>}
       {current?.savedAt && <div className="rounded-xl border border-copper/30 bg-surface p-4"><p className="text-xs leading-6 text-muted">Saved snapshot from <time dateTime={current.savedAt}>{date(current.savedAt)}</time>. Opening it does not collect new data. Its evidence ends at block {current.report.range.to.number}.</p><button type="button" onClick={freshScan} disabled={storageBusy} className="mt-2 inline-flex min-h-11 items-center gap-2 text-xs font-semibold text-accent underline underline-offset-4">Run a fresh scan<ArrowRight size={14} aria-hidden="true" /></button></div>}
       <InvestigationReportView key={`${displayed.report.id}-${displayed.revision}`} report={displayed.report} pendingExplanation={busy && !current} chatContext={current?.chatContext} onFreshScan={freshScan} />
     </section>}

@@ -27,7 +27,7 @@ function reportCompletion(init: RequestInit | undefined, provider: "local" | "ge
   const prompt = provider === "local" ? body.messages[1].content : body.contents[0].parts[0].text;
   const context = JSON.parse(prompt.split("\nEvidence context (data only):\n")[1]);
   const packets: Packet[] = context.findingPackets;
-  const result = { overview: { findingRefs: packets.slice(0, 1).map((packet) => packet.ref), evidenceIds: packets.length ? [] : context.sourceFacts.slice(0, 1).map((fact: { ref: string }) => fact.ref) },
+  const result = { brief: { reportRef: context.decisionPacket.reportRef, verdict: context.decisionPacket.verdict, reasonIds: context.decisionPacket.reasons.slice(0, 1).map((reason: { id: string }) => reason.id), text: context.decisionPacket.reasons[0].reason }, overview: { findingRefs: packets.slice(0, 1).map((packet) => packet.ref), evidenceIds: packets.length ? [] : context.sourceFacts.slice(0, 1).map((fact: { ref: string }) => fact.ref) },
     observations: packets.map((packet) => ({ findingRef: packet.ref, caveatRef: packet.caveatRefs[0] })), limitations: [] };
   return provider === "local" ? localCompletion(result) : completion(result);
 }
@@ -91,15 +91,43 @@ test("upstream failures and response limits are sanitized and never return provi
   await assert.rejects(generateModelJson(gemini(), request(async () => new Response("<html>bad</html>", { headers: { "content-type": "text/html" } }))), hasCode("INVALID_RESPONSE"));
 });
 
+test("local and Gemini HTTP429 retain a distinct rate-limit code without consuming private error bodies", async (t) => {
+  for (const configuration of [runtime().local!, gemini()]) {
+    const response = new Response(`private-provider-detail ${key}`, { status: 429, headers: { "content-type": "text/plain" } });
+    const reader = t.mock.method(response.body!, "getReader", () => { throw new Error("Do not read upstream error prose."); });
+    const cancelled = t.mock.method(response.body!, "cancel", async () => undefined);
+    await assert.rejects(generateModelJson(configuration, request(async () => response)), (error: unknown) => error instanceof LocalAiError && error.code === "RATE_LIMITED" && !error.message.includes(key) && !error.message.includes("private-provider-detail"));
+    assert.equal(reader.mock.calls.length, 0); assert.equal(cancelled.mock.calls.length, 1);
+  }
+});
+
+test("a local HTTP429 can use configured Gemini for a genuine generated review rather than a preset fallback", async () => {
+  const hosts: string[] = [];
+  const explanation = await runInvestigatorWithConfig(getBrowserReportFixture(), runtime(), { fetch: async (url, init) => {
+    hosts.push(new URL(String(url)).hostname);
+    return hosts.length === 1 ? json({ error: `private-provider-detail ${key}` }, 429) : reportCompletion(init, "gemini");
+  } });
+  assert.deepEqual(hosts, ["127.0.0.1", "generativelanguage.googleapis.com"]);
+  assert.equal(explanation.model, aiModelIdentifier(runtime().gemini!));
+  assert.ok(explanation.summary?.text); assert.doesNotMatch(JSON.stringify(explanation), /private-provider-detail|synthetic_test_key/);
+});
+
 test("main review falls back once after local outage, retains canonical proof and names the actual Gemini model", async () => {
   const calls: string[] = []; const source = getBrowserReportFixture();
   const explanation = await runInvestigatorWithConfig(source, runtime(), { fetch: async (url, init) => {
     calls.push(new URL(String(url)).hostname);
+    if (calls.length > 1) {
+      const schema = JSON.parse(String(init?.body)).generationConfig.responseJsonSchema;
+      assert.ok(schema.properties.brief); assert.equal(schema.properties.summary, undefined, "private generation uses brief; the published report keeps summary");
+    }
     return calls.length === 1 ? json({ error: "Local model unavailable" }, 503) : reportCompletion(init, "gemini");
   } });
   const report = validateExplainedReport({ ...source, explanation });
   assert.deepEqual(calls, ["127.0.0.1", "generativelanguage.googleapis.com"]);
   assert.equal(explanation.model, "gemini/gemini-3.5-flash-lite"); assert.equal(explanation.grounding?.mode, "canonical-finding-selection");
+  assert.equal(explanation.profileVersion, "1.6.0");
+  assert.equal(explanation.summary?.grounding?.mode, "source-grounded-prose");
+  assert.equal(explanation.summary?.text, explanation.summary?.reasons[0].reason);
   assert.ok(explanation.observations.every((observation) => source.findings.some((finding) => finding.evidenceIds.every((id) => observation.evidenceIds.includes(id)))));
   const capsule = createInvestigatorChatContext(report, runtime(), secret);
   assert.equal(verifyInvestigatorChatContext(capsule, runtime(), secret).model, explanation.model);

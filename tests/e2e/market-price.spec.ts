@@ -69,6 +69,10 @@ test("tiny reported pool price stays exact, warns about liquidity and shows its 
   await expect(retrieved).toBeVisible();
   await expect(market.getByText("GoPlus reports 13 holders; this separate source count is not pinned to the scan block.", { exact: true })).toBeVisible();
   await mkdir(".artifacts/market-price", { recursive: true });
+  // Secondary analysis stays collapsed until the visitor asks for it.
+  const details = page.locator("details").filter({ has: page.locator("summary", { hasText: /^Investigation details$/ }) }).first();
+  await expect(details).not.toHaveAttribute("open");
+  await details.locator(":scope > summary").click();
 
   for (const [width, height] of [[1440, 1000], [375, 812]] as const) {
     await page.setViewportSize({ width, height });

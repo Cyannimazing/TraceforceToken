@@ -3,7 +3,7 @@ import { validateHolderSnapshot } from "./holder-snapshot";
 import { deriveReportDistribution, exactPercent } from "./report-distribution";
 import { deriveCreatorAttribution } from "./creator-attribution";
 import { validateCreatorFundingCoverage } from "./creator-funding";
-import { deriveWalletSignals } from "./wallet-signals";
+import { deriveWalletSignals, verifiedPurchaseProof } from "./wallet-signals";
 import { validateLiquiditySnapshot, validateWalletActivitySnapshot } from "./chain-snapshots";
 import { tokenSecuritySnapshotSchema } from "./token-security";
 import { tokenMarketSnapshotSchema } from "./token-market";
@@ -38,12 +38,15 @@ export interface AssessmentRule {
 }
 
 export interface ReportAssessment {
-  version: "1.3.0";
+  version: "1.4.0";
   overallScore: number | null;
   displayedScore: number;
   scoreRange: { minimum: number; maximum: number };
-  band: "DANGER" | "RISKY" | "UNKNOWN";
-  verdict: "AVOID" | "CAUTION" | "REVIEW" | "INSUFFICIENT";
+  band: "DANGER" | "RISKY" | "CLEAN" | "UNKNOWN";
+  verdict: "AVOID" | "CAUTION" | "REVIEW" | "OK" | "INSUFFICIENT";
+  /** Completion of these disclosed checks, never a full audit or holder census. */
+  complete: boolean;
+  missingChecks: string[];
   /** Normalized, versioned rule weights; not calibrated outcome probabilities. */
   verdictWeights: { avoid: number; caution: number; ok: number };
   judge: { label: string; summary: string };
@@ -264,8 +267,8 @@ export function assessInvestigationReport(report: InvestigationReport): ReportAs
   if (freshWalletsPercent !== null && Number(freshWalletsPercent) >= 80) gates.push({ id: "fresh-wallets", severity: "hard", label: `${freshWalletsPercent}% Fresh wallets`, basis: "At least 80% of examined positive noncreator EOA holders have a pinned outgoing nonce at most 10. This is not their lifetime all-transaction count or proof of common control.", evidenceIds: [] });
   if (creatorHolding && denominator && BigInt(creatorHolding.balanceRaw!) * 10n >= denominator) {
     const basis = `The ${creatorAttribution!.kind === "direct-contract-creation" ? "receipt-backed direct deployer" : "GoPlus-reported creator"} holds ${creatorSharePercent}% of ${distribution.holdingDenominatorLabel} in pinned balance reads. ${creatorAttribution!.basis} Creator-funded wallet holdings are not added without a complete attribution rule.`;
-    gates.push({ id: "creator-holding", severity: "soft", label: `Creator holds ${creatorSharePercent}%`, basis, evidenceIds: creatorAttribution!.evidenceIds, sourceUrl: creatorAttribution!.sourceUrl });
-    triggeredRules.push({ id: "creator-holding", category: "dev", label: "Creator holding is at least 10%", basis, evidenceIds: creatorAttribution!.evidenceIds, addresses: [creatorHolding.address], holderBlock: { ...report.range.to }, deductedPoints: 10 });
+    gates.push({ id: "creator-holding", severity: "soft", label: `Creator holds ${creatorSharePercent}% of ${distribution.holdingDenominatorLabel}`, basis, evidenceIds: creatorAttribution!.evidenceIds, sourceUrl: creatorAttribution!.sourceUrl });
+    triggeredRules.push({ id: "creator-holding", category: "dev", label: `Creator holding is at least 10% of ${distribution.holdingDenominatorLabel}`, basis, evidenceIds: creatorAttribution!.evidenceIds, addresses: [creatorHolding.address], holderBlock: { ...report.range.to }, deductedPoints: 10 });
   }
   const parsedMarket = tokenMarketSnapshotSchema.safeParse(report.token.marketSnapshot);
   const market = parsedMarket.success && parsedMarket.data.sourceUrl === `https://api.dexscreener.com/token-pairs/v1/base/${report.token.address}` ? parsedMarket.data : null;
@@ -284,7 +287,14 @@ export function assessInvestigationReport(report: InvestigationReport): ReportAs
     { id: "snipers", label: "Snipers", possiblePoints: 10, metric: sniperSharePercent === null ? null : `${sniperSharePercent}% held by flagged wallets`, basis: "Receipt-supported buys in the first minute after a proven initial liquidity mint in the acquired full history.", limitations: ["This is relative to retained authenticated pool liquidity, not proof of the earliest trading venue anywhere.", "Unsupported routes remain unclassified; an unflagged wallet is not proven to have bought later."] },
     { id: "dev", label: "Dev", possiblePoints: 10, metric: creatorSharePercent === null ? null : `${creatorSharePercent}% creator holding`, basis: "Pinned holding of the attributed creator; direct receipt-backed deployment takes precedence over GoPlus-reported attribution. Neither establishes present control.", limitations: ["Developer identity, privileged control and exhaustive creator-funded holdings remain unverified."] },
   ];
-  const sniperEntriesComplete = walletBasis && holders.every((row) => signals.wallets.some((signal) => signal.address === row.address && signal.entry && ["buy", "mint"].includes(signal.entry.kind)));
+  const sniperEntriesComplete = walletBasis && Boolean(signals.initialLiquidity) && holders.every((row) => {
+    const entry = signals.wallets.find((signal) => signal.address === row.address)?.entry;
+    if (entry?.kind === "mint") return true;
+    if (entry?.kind !== "buy") return false;
+    const event = report.evidence.find((event) => event.kind === "transfer" && event.to === row.address && event.transactionHash === entry.transactionHash && event.assetAddress === report.token.address && event.purchase);
+    const purchase = event ? verifiedPurchaseProof(report, event) : null;
+    return purchase?.protocol === "uniswap-v2" && purchase.pool === signals.initialLiquidity!.pool && purchase.factory === signals.initialLiquidity!.factory;
+  });
   const fraction = (available: boolean, amount: bigint): readonly [bigint, bigint] | null => available && denominator !== null ? [amount, denominator] : null;
   const risks: Record<AssessmentCategoryId, readonly [bigint, bigint] | null> = {
     swarm: dumpFraction,
@@ -316,11 +326,18 @@ export function assessInvestigationReport(report: InvestigationReport): ReportAs
   const hard = gates.some((gate) => gate.severity === "hard"), soft = gates.some((gate) => gate.severity === "soft");
   const maximum = Math.min(score.scoreRange.maximum, soft ? 59 : 100);
   const minimum = Math.min(score.scoreRange.minimum, maximum);
-  const verdict = hard ? "AVOID" : soft ? "CAUTION" : triggeredRules.length ? "REVIEW" : "INSUFFICIENT";
+  const missingChecks = categories.filter((category) => category.points === null).map((category) => category.label);
+  for (const [id, label] of [["is_honeypot", "Selling restrictions"], ["owner_change_balance", "Administrator balance controls"], ["transfer_pausable", "Transfer pause controls"]] as const) {
+    if (security?.status !== "reported" || !security.checks.some((check) => check.id === id && check.value !== "unknown")) missingChecks.push(label);
+  }
+  if (market?.status !== "reported" || market.liquidityUsd === null) missingChecks.push("Reported trading-pool liquidity");
+  const complete = missingChecks.length === 0;
+  const measuredConcern = categories.some((category) => category.status === "concern");
+  const verdict = hard ? "AVOID" : soft ? "CAUTION" : triggeredRules.length || measuredConcern ? "REVIEW" : complete ? "OK" : "INSUFFICIENT";
   const assessment: ReportAssessment = {
-    version: "1.3.0", overallScore: score.complete ? Math.round(minimum) : null, displayedScore: Math.round(minimum), scoreRange: { minimum, maximum }, band: hard ? "DANGER" : soft ? "RISKY" : "UNKNOWN", verdict, verdictWeights: { avoid: 0, caution: 0, ok: 0 },
+    version: "1.4.0", overallScore: score.complete ? Math.round(minimum) : null, displayedScore: Math.round(minimum), scoreRange: { minimum, maximum }, band: hard ? "DANGER" : soft ? "RISKY" : verdict === "OK" ? "CLEAN" : "UNKNOWN", verdict, complete, missingChecks, verdictWeights: { avoid: 0, caution: 0, ok: 0 },
     judge: {
-      label: hard ? "A hard warning rule triggered" : soft ? "Review the creator, market and contract warnings" : triggeredRules.length ? "Review the observed concerns" : "Evidence is insufficient for a complete score",
+      label: hard ? "A hard warning rule triggered" : soft ? "Review the creator, market and contract warnings" : triggeredRules.length || measuredConcern ? "Review the observed concerns" : complete ? "No major warning found in the completed checks" : "Evidence is insufficient for a complete assessment",
       summary: `${score.earnedPoints} earned category points from ${assessedPossiblePoints}/100 assessed weight. Unassessed categories earn 0 without becoming absent findings. The possible score is ${minimum}–${maximum}, including warning caps. Local scoring curves and normalized decision weights are disclosed rules, not calibrated probabilities.`,
     },
     assessedPoints: score.earnedPoints,

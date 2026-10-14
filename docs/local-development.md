@@ -21,7 +21,7 @@ The existing migrations retain earlier prototype tables for compatibility. The c
 
 ## Start the model and application
 
-Follow [the local AI guide](local-ai.md) to run private Ollama, install the reviewed qwen3:4b-instruct-2507-q4_K_M base when missing, and create traceforce-investigator with profile 1.4.0. Model downloads/setup are explicit operator actions. Local inference needs no external AI key. Optional `GEMINI_API_KEY`/`GEMINI_MODEL` settings in `.env.local` enable the documented server-only fallback; leave the key blank for local-only inference. Restart execution after changing settings.
+Follow [the local AI guide](local-ai.md) to run private Ollama, install the reviewed qwen3:4b-instruct-2507-q4_K_M base when missing, and create traceforce-investigator with profile 1.6.0. Model downloads/setup are explicit operator actions. For local-only inference, set `INVESTIGATOR_AI_PROVIDER=local`, `LOCAL_AI_MODEL=traceforce-investigator` and the running loopback `LOCAL_AI_BASE_URL` in `.env.local`. This selection needs no external AI key and does not call configured cloud providers. Restart execution after changing settings.
 
 ```powershell
 npm.cmd run ai:serve
@@ -44,7 +44,7 @@ Fresh reports stay in React/page memory. **Save in this browser** explicitly sto
 
 There is no report autosave. IndexedDB snapshots and **Download JSON** include only the report, never the signed question context or transcript. Opening a saved snapshot requires a fresh scan before questions become available. Clearing the current report does not remove separately saved browser snapshots.
 
-Current-page questions use the report's short-lived signed context, expiring after 30 minutes. Answers cite existing evidence and indicate when another fresh scan is needed. Each request sends only its current question/context; the transcript remains in page memory, with at most 20 visible messages. Questions do not acquire new chain evidence or establish current balances, ownership or intent.
+Current-page questions use the report's short-lived signed context, expiring after 30 minutes. Answers cite existing evidence and indicate when another fresh scan is needed. Each request sends its current question, signed context and at most six recent messages as untrusted conversational context; the transcript remains in page memory, with at most 20 visible messages. Questions do not acquire new chain evidence or establish current balances, ownership or intent.
 
 The public API allows a combined burst of **30 requests per visitor in 30 seconds** across scans and questions, with **one active scan per visitor**. There is no hourly scan or question quota. Page navigation creates a signed, host-only, HttpOnly, SameSite=Strict visitor cookie; HTTPS also sets Secure. Tabs in one browser context share the identity, while separate contexts are independent even on localhost. Raw IPs, cookie values and token parameters are not stored in admission rows. Same-origin and valid-cookie checks precede admission; malformed bodies with a valid visitor session still consume burst capacity. A later validation, provider or model failure does not restore that request's burst unit. Active-scan leases release when a stream ends or is cancelled and expire after interrupted execution. Expired admission rows receive bounded cleanup. These controls bound application work; creating new anonymous visitor identities remains possible and hosted traffic protection needs an edge or reverse-proxy policy. No report/evidence cache is reused for the next scan.
 

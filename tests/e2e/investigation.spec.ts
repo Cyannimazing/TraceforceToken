@@ -13,6 +13,12 @@ async function mockCompletedReport(page: Page, chatContext?: string) {
   await page.getByLabel("Base token contract").fill(browserFixture.token);
   await page.getByRole("button", { name: "Start investigation", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Synthetic browser test fixture", level: 2, exact: true })).toBeVisible();
+  await inspectDetails(page);
+}
+
+async function inspectDetails(page: Page) {
+  const disclosure = page.getByText("Investigation details", { exact: true }).locator("..");
+  if (!await disclosure.evaluate((element) => (element as HTMLDetailsElement).open)) await disclosure.locator("summary").first().click();
 }
 
 async function assertNoPageOverflow(page: Page) {
@@ -28,14 +34,16 @@ async function scrollForCapture(locator: Locator) {
 test("synthetic browser fixture: progress streams into a page-only report without polling or saved navigation", async ({ page }) => {
   await page.addInitScript(({ report }) => {
     const original = window.fetch.bind(window), requests: unknown[] = [];
+    const completion: { finish: () => void } = { finish: () => undefined };
     Object.defineProperty(window, "__syntheticScanRequests", { value: requests });
+    Object.defineProperty(window, "__syntheticScanCompletion", { value: completion });
     window.fetch = async (input, init) => {
       if (String(input) !== "/api/investigations") return original(input, init);
       requests.push({ method: init?.method, body: JSON.parse(String(init?.body)) });
       const encoder = new TextEncoder();
       return new Response(new ReadableStream<Uint8Array>({ start(controller) {
         controller.enqueue(encoder.encode(JSON.stringify({ type: "progress", stage: "Synthetic fixture: checking transaction receipts" }) + "\n"));
-        setTimeout(() => { controller.enqueue(encoder.encode(JSON.stringify({ type: "report", report }) + "\n")); controller.close(); }, 700);
+        completion.finish = () => { controller.enqueue(encoder.encode(JSON.stringify({ type: "report", report }) + "\n")); controller.close(); };
       } }), { headers: { "content-type": "application/x-ndjson" } });
     };
   }, { report: getBrowserReportFixture() });
@@ -48,117 +56,63 @@ test("synthetic browser fixture: progress streams into a page-only report withou
   await page.getByLabel("Base token contract").fill(browserFixture.token);
   await page.getByRole("button", { name: "Start investigation", exact: true }).click();
   await expect(page).toHaveURL(/\/investigate$/);
-  await expect(page.getByRole("status")).toContainText("Synthetic fixture: checking transaction receipts");
-  await expect(page.getByRole("heading", { name: "Explanation in plain English", exact: true })).toHaveCount(0);
+  const loading = page.locator("[data-scan-progress]");
+  await expect(loading).toHaveAttribute("data-scan-stage", "investigating");
+  await expect(loading.getByRole("status").locator("p")).toHaveText(["Checking the token", "Reviewing the available information."]);
+  await expect(loading).not.toContainText("Synthetic fixture: checking transaction receipts");
+  await expect(page.getByRole("heading", { name: "Report assessment", exact: true })).toHaveCount(0);
+  await page.evaluate(() => (window as unknown as { __syntheticScanCompletion: { finish: () => void } }).__syntheticScanCompletion.finish());
   await expect(page.getByRole("heading", { name: "Synthetic browser test fixture", level: 2, exact: true })).toBeVisible({ timeout: 10000 });
-  await expect(page.getByRole("heading", { name: "Explanation in plain English", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Report assessment", exact: true })).toBeVisible();
   expect(statusRequests).toEqual([]);
   expect(await page.evaluate(() => (window as unknown as { __syntheticScanRequests: unknown[] }).__syntheticScanRequests)).toEqual([{ method: "POST", body: { token: browserFixture.token, lookbackBlocks: 20000, scope: "full" } }]);
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 });
 });
 
 test("synthetic browser fixture: dark dashboard prioritizes its graph and keeps technical detail expandable", async ({ page }) => {
-  await page.goto("/investigate");
-  await page.screenshot({ path: ".next/investigate-empty-desktop.png" });
-  await page.setViewportSize({ width: 375, height: 812 }); await assertNoPageOverflow(page);
-  await page.screenshot({ path: ".next/investigate-empty-mobile.png" });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await mockCompletedReport(page);
-  expect(await page.locator(".engine-shell").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(10, 12, 16)");
-  const graph = page.getByRole("region", { name: "Observed relationships", exact: true }), assessment = page.getByRole("region", { name: "Limited coverage", exact: true });
-  const verdict = page.getByRole("region", { name: "VERDICT OUTPUT", exact: true });
-  const graphBox = await graph.boundingBox(), assessmentBox = await verdict.boundingBox();
-  expect(graphBox).not.toBeNull(); expect(assessmentBox).not.toBeNull();
-  expect(graphBox!.width).toBeGreaterThan(assessmentBox!.width * 1.35);
-  const keyFindings = page.getByRole("region", { name: "Key findings", exact: true });
-  await expect(keyFindings.getByRole("heading", { level: 2 })).toHaveText(["Who funded?", "Wallet links", "Early accumulation", "Linked selling"]);
-  await expect(keyFindings.getByRole("button", { name: "Inspect findings", exact: true })).toHaveCount(4);
-  await expect(keyFindings.getByText("AI interpretation · inspect cited findings", { exact: true })).toHaveCount(2);
-  await expect(keyFindings.getByText("Shared observed native funding source", { exact: true })).toBeVisible();
-  await expect(keyFindings.getByText("First observed native funding", { exact: true })).toHaveCount(0);
-  await expect(keyFindings.getByText(getBrowserReportFixture().explanation.observations[0].caveat, { exact: true })).toBeVisible();
-  const discovered = page.getByRole("region", { name: "Synthetic browser test fixture", exact: true }).locator("dt").filter({ hasText: /^Addresses examined$/ }).locator("..");
-  await expect(discovered.locator("dd").first()).toHaveText("3");
-  await expect(page.getByRole("region", { name: "Data comparison", exact: true })).toContainText("2 eligible participants");
-  expect(await keyFindings.evaluate((element) => Boolean(element.compareDocumentPosition(document.getElementById("holders-title")!) & Node.DOCUMENT_POSITION_PRECEDING))).toBe(true);
-  expect(await keyFindings.evaluate((element) => Boolean(element.compareDocumentPosition(document.getElementById("deployer-dna-title")!) & Node.DOCUMENT_POSITION_PRECEDING))).toBe(true);
-  await expect(keyFindings.getByRole("heading", { level: 2 })).toHaveCount(4);
-  for (const heading of await keyFindings.getByRole("heading", { level: 2 }).all()) await expect(heading).toBeVisible();
-  expect(await page.locator("#questions-title").evaluate((element) => Boolean(element.compareDocumentPosition(document.getElementById("holders-title")!) & Node.DOCUMENT_POSITION_PRECEDING))).toBe(true);
-  await expect(graph.locator('svg[viewBox="0 0 900 600"] line[data-kind="funding"]')).toHaveCount(getBrowserReportFixture().connections.filter((edge) => edge.kind === "funding").length);
-  await expect(page.getByLabel(/wallet limit|wallets to examine|maximum wallets/i)).toHaveCount(0);
-  await expect(page.locator("#max-wallets")).toHaveCount(0);
+  const investigation = page.getByText("Investigation details", { exact: true }).locator("..");
+  await investigation.locator("summary").first().click();
+  await expect(investigation).toHaveJSProperty("open", false);
+  const graph = page.getByRole("region", { name: "Observed relationships", exact: true });
+  const verdict = page.getByRole("region", { name: "Important checks", exact: true });
+  const [graphBox, verdictBox] = await Promise.all([graph.boundingBox(), verdict.boundingBox()]);
+  expect(graphBox!.width).toBeGreaterThan(verdictBox!.width * 1.35);
+  await expect(verdict).toContainText("INSUFFICIENT");
+  await expect(verdict).toContainText("not enough checked evidence");
+  await expect(page.getByText("TraceForge / Report", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Report assessment", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Verdict receipt", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "DECISION X-RAY", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Verdict decision weights", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("AI review receipt", { exact: true })).toHaveCount(0);
   const market = page.getByRole("region", { name: "Market snapshot", exact: true });
   expect(await market.locator("dt").allTextContents()).toEqual(["Price (reported)", "MCAP", "Liquidity", "24H Vol", "Pool age", "Wallets shown"]);
   await expect(market.locator("dd > span:first-child")).toHaveText(["—", "—", "—", "—", "—", "—"]);
-  for (const title of [/^All findings \(/, /^Transaction evidence \(/, /^Timeline and retained connections$/, /^Coverage and block identity$/, /^Website source and investigator details$/]) {
-    const disclosure = page.locator("details").filter({ has: page.locator("summary").filter({ hasText: title }) });
-    expect(await disclosure.evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);
-  }
   await expect(graph).toContainText("Current holdings are unknown.");
-  await expect(assessment).toContainText("66.6%");
-  await expect(assessment).toContainText("0 unavailable · 1 not examined");
-  await expect(assessment).toContainText("FUNDING SEARCHES");
-  await expect(assessment).toContainText("Retained evidence");
-  await expect(assessment).toContainText("Findings");
-  await expect(assessment.getByText("Risk probability", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("TRACEFORCE // REPORT", { exact: true })).toBeVisible();
-  await expect(page.getByText("On-chain snapshot:", { exact: false })).toContainText("Balances and TXS use this finalized block");
-  await expect(verdict).toContainText("INSUFFICIENT");
-  await expect(verdict.getByLabel("Verdict decision weights", { exact: true }).locator("dt")).toHaveText(["avoid", "caution", "ok"]);
-  await expect(verdict.getByLabel("Verdict decision weights", { exact: true }).locator("dd")).toHaveText(["0.0%", "100.0%", "0.0%"]);
-  await expect(verdict.getByRole("heading", { name: "DECISION X-RAY", exact: true })).toBeVisible();
-  await expect(verdict.getByText("80", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Report summary", exact: true })).toBeVisible();
-  const identity = page.getByRole("region", { name: "Synthetic browser test fixture", exact: true });
-  await expect(identity.getByRole("link", { name: "Explorer", exact: true })).toHaveAttribute("href", `https://base.blockscout.com/token/${browserFixture.token}`);
-  await expect(identity.getByRole("link", { name: "DEX Screener", exact: true })).toHaveCount(0);
-  const judge = page.getByRole("region", { name: "Explanation in plain English", exact: true });
-  await expect(judge.getByText(getBrowserReportFixture().explanation.overview.text, { exact: true })).toBeVisible();
-  expect(await judge.evaluate((element) => Boolean(element.compareDocumentPosition(document.getElementById("holders-title")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
-  const riskDetails = verdict.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Details$/ }) });
-  expect(await riskDetails.evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);
-  await expect(judge.locator('dl[aria-label="AI review receipt"] dt')).toHaveCount(6);
-  await riskDetails.locator("summary").click();
-  await expect(riskDetails).toContainText("Evidence is insufficient for a complete score");
-  await expect(riskDetails.locator("dt")).toHaveText(["Largest holder", "Creator holds", "Examined top 10", "Dump impact"]);
-  await expect(riskDetails.locator("dd")).toHaveText(["—", "—", "—", "—"]);
-  await expect(riskDetails).toContainText("Unassessed categories earn 0 without becoming absent findings");
-  await riskDetails.locator("summary").click();
   const breakdown = page.getByRole("region", { name: "Score breakdown", exact: true });
-  await expect(breakdown.getByLabel("Category scores", { exact: true }).locator("[data-category-id]")).toHaveCount(6);
-  await expect(breakdown.locator("details[data-score-details]")).toHaveJSProperty("open", false);
   await expect(breakdown.locator('[data-assessment-status="not_assessed"]')).toHaveCount(6);
-  await breakdown.locator("details[data-score-details] > summary").click();
-  await expect(breakdown.getByText("Creator not confirmed", { exact: true })).toBeVisible();
-  const dev = breakdown.locator('[data-category-details="dev"]');
-  await expect(dev.getByText("No creation transaction or usable creator attribution was retained. This does not establish that the token has no creator.", { exact: true })).toBeVisible();
-  await breakdown.locator("details[data-score-details] > summary").click();
-  await expect(page.getByRole("region", { name: "Triggered rules", exact: true })).toContainText("No supported rule triggered");
-  const clusters = page.getByRole("region", { name: "Clusters", exact: true });
-  await expect(clusters.getByRole("heading", { level: 3 })).toHaveCount(getBrowserReportFixture().groups.length);
-  const clusterBox = await clusters.locator("ul > li").first().boundingBox(), clusterSectionBox = await clusters.boundingBox();
-  expect(clusterBox!.width).toBeGreaterThan(clusterSectionBox!.width * 0.9);
-  const contract = page.getByRole("region", { name: "Contract", exact: true });
-  await expect(contract.getByRole("link")).toHaveAttribute("href", `https://basescan.org/address/${browserFixture.token}`);
-  await expect(contract.getByText("Not assessed", { exact: true })).toHaveCount(3);
-  await expect(page.getByRole("region", { name: "Deployer DNA", exact: true }).getByText("Not assessed", { exact: true })).toHaveCount(3);
-  await expect(page.getByRole("region", { name: "Top holders", exact: true })).toContainText("Not assessed.");
-  const walletLabels = page.getByRole("region", { name: "Wallet activity", exact: true }).locator("tbody tr > td:first-child button");
-  const walletLabelLayout = await walletLabels.evaluateAll((elements) => elements.map((element) => {
-    const label = [...element.childNodes].find((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
-    const range = document.createRange();
-    if (label) range.selectNodeContents(label);
-    return { whiteSpace: getComputedStyle(element).whiteSpace, lines: label ? range.getClientRects().length : 0 };
-  }));
-  expect(walletLabelLayout.length).toBe(getBrowserReportFixture().wallets.length);
-  for (const label of walletLabelLayout) expect(label).toEqual({ whiteSpace: "nowrap", lines: 1 });
-  await assertNoPageOverflow(page);
-  await page.screenshot({ path: ".next/investigation-verdict-full-desktop.png", fullPage: true });
-  await scrollForCapture(breakdown); await page.screenshot({ path: ".next/investigation-rules-desktop.png" });
-  await page.setViewportSize({ width: 375, height: 812 }); await assertNoPageOverflow(page);
-  await scrollForCapture(breakdown); await page.screenshot({ path: ".next/investigation-rules-mobile.png" });
-  await page.screenshot({ path: ".next/investigation-verdict-full-mobile.png", fullPage: true });
+  await expect(breakdown).toContainText("Some checks are incomplete");
+  await expect(breakdown.locator("details[data-score-details]")).toHaveJSProperty("open", false);
+  await inspectDetails(page);
+  const cards = page.getByRole("region", { name: "Key findings", exact: true });
+  await expect(cards.getByRole("heading", { level: 2 })).toHaveText(["Who funded?", "Wallet links", "Early accumulation", "Linked selling"]);
+  await expect(cards.getByRole("button", { name: "Inspect findings", exact: true })).toHaveCount(4);
+  const coverage = page.locator("details[data-report-checks]");
+  await coverage.locator(":scope > summary").click();
+  await expect(coverage).toContainText("Funding was examined for 2 of 3 eligible addresses.");
+  await expect(coverage).toContainText("Some requested transaction history could not be read.");
+  await expect(page.getByRole("region", { name: "Data comparison", exact: true })).toContainText("2 eligible participants");
+  await expect(graph.locator('svg[viewBox="0 0 900 600"] line[data-kind="funding"]')).toHaveCount(getBrowserReportFixture().connections.filter((edge) => edge.kind === "funding").length);
+  const identity = page.getByRole("region", { name: "Synthetic browser test fixture", exact: true });
+  await expect(identity.getByRole("link", { name: "Explorer", exact: true })).toHaveAttribute("href", 'https://base.blockscout.com/token/' + browserFixture.token);
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 375, height: 812 }]) {
+    await page.setViewportSize(viewport);
+    await assertNoPageOverflow(page);
+    await expect(verdict).toBeVisible();
+    await expect(page.getByRole("region", { name: "Top holders", exact: true })).toBeVisible();
+  }
 });
 
 test("incomplete near-total funding coverage and nontransacting candidates remain distinct", async ({ page }) => {
@@ -169,12 +123,14 @@ test("incomplete near-total funding coverage and nontransacting candidates remai
   report.coverage.funding = report.wallets.map((wallet, index) => ({ ...report.coverage.funding[0], wallet: wallet.address, status: index < 200 ? "partial" : "not_examined" }));
   await page.route("**/api/investigations", (route) => route.fulfill({ status: 200, contentType: "application/x-ndjson", body: JSON.stringify({ type: "report", report }) + "\n" }));
   await page.goto("/investigate"); await page.getByLabel("Base token contract").fill(browserFixture.token); await page.getByRole("button", { name: "Start investigation", exact: true }).click();
-  const assessment = page.getByRole("region", { name: "Limited coverage", exact: true });
-  await expect(assessment).toContainText("99.5%");
+  await inspectDetails(page);
+  const assessment = page.locator("details[data-report-checks]");
+  await assessment.locator(":scope > summary").click();
   await expect(assessment).not.toContainText("100%");
-  await expect(assessment).toContainText("200 of 201 funding searches examined");
-  await expect(assessment).toContainText("0 unavailable · 1 not examined");
-  const discovered = page.getByRole("region", { name: "Synthetic browser test fixture", exact: true }).locator("dt").filter({ hasText: /^Addresses examined$/ }).locator("..");
+  await expect(assessment).toContainText("Funding was examined for 200 of 201 eligible addresses.");
+  await expect(assessment).toContainText("0 complete · 200 partial · 0 unavailable · 1 not checked.");
+  await expect(assessment).toContainText("Some requested transaction history could not be read.");
+  const discovered = page.getByRole("region", { name: "Synthetic browser test fixture", exact: true }).locator("dt").filter({ hasText: /^Addresses discovered$/ }).locator("..");
   await expect(discovered.locator("dd").first()).toHaveText("201");
   await expect(page.getByRole("region", { name: "Data comparison", exact: true })).toContainText("2 eligible participants");
 });
@@ -191,30 +147,13 @@ test("canonical model-selected findings are labeled as reviewed and retain exact
   });
   await page.route("**/api/investigations", (route) => route.fulfill({ status: 200, contentType: "application/x-ndjson", body: JSON.stringify({ type: "report", report }) + "\n" }));
   await page.goto("/investigate"); await page.getByLabel("Base token contract").fill(browserFixture.token); await page.getByRole("button", { name: "Start investigation", exact: true }).click();
-  const reviewed = page.getByRole("region", { name: "AI-reviewed findings", exact: true }), cards = page.getByRole("region", { name: "Key findings", exact: true });
-  const roles = reviewed.locator('dl[aria-label="Engine and LLM roles"]');
-  const receipt = reviewed.locator('dl[aria-label="AI review receipt"]');
-  const supporting = reviewed.getByText("Supporting observations (1)", { exact: true }).locator("..");
-  const reportDetails = reviewed.getByText("Report details", { exact: true }).locator("..");
-  await expect(reviewed.getByText(report.explanation.overview.text, { exact: true })).toBeVisible();
+  const reviewed = page.getByRole("region", { name: "Report assessment", exact: true }), cards = page.getByRole("region", { name: "Key findings", exact: true });
+  const supporting = reviewed.getByText("Supporting evidence", { exact: true }).locator("..");
+  await expect(reviewed.getByText(report.explanation.overview.text, { exact: true })).toHaveCount(0);
   await expect(supporting).toHaveJSProperty("open", false);
-  await expect(reportDetails).toHaveJSProperty("open", false);
-  await expect(roles).not.toBeVisible();
-  await expect(receipt).not.toBeVisible();
+  await expect(reviewed.locator('dl[aria-label="AI review receipt"]')).toHaveCount(0);
   await expect(supporting.getByText(canonicalFindingClaim(finding), { exact: true })).not.toBeVisible();
-  await expect(supporting.getByText(finding.limitations[0], { exact: true })).not.toBeVisible();
-  await reportDetails.locator("summary").click();
-  await expect(roles).toBeVisible();
-  await expect(roles).toContainText("TraceForce Engine");
-  await expect(roles).toContainText("calculates balances, wallet links and rule-based flags");
-  await expect(roles).toContainText(`Local LLM · ${report.explanation.model}`);
-  await expect(roles).toContainText("Missing evidence stays unknown.");
-  await expect(receipt).toBeVisible();
-  await expect(receipt).toContainText(`${report.explanation.context.suppliedEvidence} of ${report.evidence.length} records`);
-  await expect(receipt).toContainText(`${report.explanation.context.omittedEvidence} records`);
-  await expect(reviewed).toContainText("The model selected canonical statements and caveats.");
-  await expect(reviewed).toContainText("1 not examined");
-  await expect(page.getByRole("heading", { name: "Explanation in plain English", exact: true })).toHaveCount(0);
+  await inspectDetails(page);
   await expect(cards.getByText("AI-reviewed finding · inspect cited evidence", { exact: true })).toHaveCount(1);
   await expect(cards.getByText(finding.title, { exact: true })).toBeVisible();
   await expect(cards.getByText(finding.limitations[0], { exact: true })).toBeVisible();
@@ -229,7 +168,7 @@ test("canonical model-selected findings are labeled as reviewed and retain exact
 
 test("investigative leads give concrete follow-up targets and open their actual retained proof", async ({ page }) => {
   await mockCompletedReport(page);
-  const report = getBrowserReportFixture(), judge = page.getByRole("region", { name: "Explanation in plain English", exact: true });
+  const report = getBrowserReportFixture(), judge = page.getByText("Investigation details", { exact: true }).locator("..");
   await expect(judge.getByText(/^Investigative leads \(/).locator("..")).toHaveJSProperty("open", false);
   await expect(judge.getByText("Trace the shared funder upstream", { exact: true })).not.toBeVisible();
   await judge.getByText(/^Investigative leads \(/).click();
@@ -294,6 +233,7 @@ test("synthetic pinned balances show supply shares while unread candidates remai
   report.walletActivitySnapshot = { block: { ...report.range.to }, rows: [browserFixture.walletA, browserFixture.walletB].map((address) => ({ address, code: "eoa", outgoingTransactionCountRaw: null })) };
   await page.route("**/api/investigations", (route) => route.fulfill({ status: 200, contentType: "application/x-ndjson", body: JSON.stringify({ type: "report", report }) + "\n" }));
   await page.goto("/investigate"); await page.getByLabel("Base token contract").fill(browserFixture.token); await page.getByRole("button", { name: "Start investigation", exact: true }).click();
+  await inspectDetails(page);
   const graph = page.getByRole("region", { name: "Observed relationships", exact: true }), holders = page.getByRole("region", { name: "Top holders", exact: true });
   await expect(graph).toContainText("Area: share of total supply at block 400, using one scale.");
   await expect(graph.getByRole("button", { name: `Select wallet ${browserFixture.walletA}`, exact: true })).toContainText("12.5%");
@@ -301,7 +241,8 @@ test("synthetic pinned balances show supply shares while unread candidates remai
   await graph.getByRole("button", { name: "All addresses", exact: true }).click();
   await expect(graph.getByRole("button", { name: `Select wallet ${browserFixture.funder}`, exact: true })).toContainText("—");
   await graph.getByRole("button", { name: "Wallets", exact: true }).click();
-  await expect(holders).toContainText("Wallet shares use pinned total supply");
+  await expect(holders).toContainText("Shares use 1,000 total supply");
+  await expect(holders).toHaveAttribute("data-holding-denominator-raw", (1000n * unit).toString());
   await expect(holders.getByText("Float unavailable: 1 candidate balances unread.", { exact: true })).toBeVisible();
   await expect(holders.getByRole("table", { name: "Top holders", exact: true }).getByRole("columnheader").nth(2)).toHaveText("%");
   await expect(holders.getByRole("cell", { name: "12.5%", exact: true })).toHaveCount(1);
@@ -311,7 +252,10 @@ test("synthetic pinned balances show supply shares while unread candidates remai
   await expect(firstHolder.getByRole("cell").nth(4)).toHaveText("—");
   await expect(firstHolder.getByRole("cell").nth(5)).toHaveText("—");
   await expect(firstHolder.getByRole("cell").nth(6)).toHaveText("#1");
-  await expect(page.getByRole("region", { name: "Limited coverage", exact: true })).toContainText("17.5%");
+  // The broader risk basis can exclude the verified zero pool while the wallet
+  // table requires a total-supply fallback for its unread candidate. Here both
+  // exact denominators are 1,000; their different scope labels stay explicit.
+  await expect(page.getByRole("region", { name: "Score", exact: true })).toContainText("Largest holder: 12.50% of float");
   const breakdown = page.getByRole("region", { name: "Score breakdown", exact: true });
   const concentration = breakdown.locator('[data-category-id="concentration"]');
   await expect(concentration).toContainText("0/15");
@@ -320,24 +264,26 @@ test("synthetic pinned balances show supply shares while unread candidates remai
   await breakdown.locator("details[data-score-details] > summary").click();
   await expect(breakdown.locator('[data-category-details="concentration"]')).toContainText("17.50% top 10 examined");
   await expect(breakdown.locator('[data-assessment-status="not_assessed"]')).toHaveCount(6);
-  await expect(breakdown.getByText("Creator not confirmed", { exact: true })).toBeVisible();
+  await expect(breakdown.locator('[data-category-details="dev"]')).toContainText("could not be completed");
   const rules = page.getByRole("region", { name: "Rule evidence", exact: true });
   await expect(rules).toContainText("An eligible examined address holds at least 10% of total supply");
-  await expect(rules.getByLabel("Review without point deduction", { exact: true })).toHaveText("Review");
+  await expect(rules).toContainText("Evidence behind the warnings");
   await expect(rules).not.toContainText("−15");
-  await expect(rules).toContainText("BLOCK 400");
-  const balanceSummary = page.getByRole("region", { name: "VERDICT OUTPUT", exact: true });
+  await expect(holders.locator("time")).toHaveAttribute("datetime", new Date(report.holderSnapshot.block.timestamp * 1000).toISOString());
+  await expect(holders.locator("time")).toHaveText("Oct 9, 2025, 9:43 AM UTC");
+  await expect(firstHolder.getByRole("cell").nth(2)).toHaveAttribute("title", /tokens at block 400\./);
+  const balanceSummary = page.getByRole("region", { name: "Important checks", exact: true });
   await expect(balanceSummary).toContainText("REVIEW");
   await expect(balanceSummary).not.toContainText("75%");
   await expect(balanceSummary).not.toContainText("READ COVERAGE");
-  const verdictDetails = balanceSummary.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Details$/ }) });
+  const verdictDetails = balanceSummary.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^What was checked$/ }) });
   await verdictDetails.locator("summary").first().click();
-  await expect(verdictDetails).toContainText("3/4 balances");
-  await expect(verdictDetails.locator("dt")).toHaveText(["Largest holder", "Creator holds", "Examined top 10", "Dump impact"]);
-  await expect(verdictDetails.locator("dd")).toHaveText(["12.50%", "—", "17.50%", "—"]);
+  await expect(verdictDetails).toContainText("3 of 4 candidate balances");
+  await expect(verdictDetails).toContainText("Missing information is not a clean result");
   const holderMetric = page.getByRole("region", { name: "Market snapshot", exact: true }).locator("dt").filter({ hasText: /^Wallets shown$/ });
   await expect(holderMetric.locator("..").locator("dd > span:first-child")).toHaveText("2");
-  await expect(holderMetric).toHaveAttribute("title", /Verified positive EOA rows.*not a complete holder census/);
+  await expect(holderMetric.locator("..")).toContainText("Verified positive EOA rows");
+  await expect(holderMetric.locator("..")).toContainText("not a complete holder census");
   await scrollForCapture(page.getByRole("heading", { name: "Your investigation report", exact: true }));
   await page.screenshot({ path: ".next/investigation-holders-desktop.png" });
   await page.setViewportSize({ width: 375, height: 812 }); await assertNoPageOverflow(page);
@@ -392,9 +338,9 @@ test("synthetic linked-selling verdict retains exact supporting citations withou
   await page.getByRole("region", { name: "Score breakdown", exact: true }).locator("details[data-score-details] > summary").click();
   const rules = page.getByRole("region", { name: "Rule evidence", exact: true });
   await expect(rules.getByRole("heading", { name: /^Previously linked wallets sold within 600 seconds/ })).toBeVisible();
-  await expect(rules).toContainText("Review");
+  await expect(page.getByRole("region", { name: "Important checks", exact: true })).toContainText("REVIEW");
   await expect(rules).not.toContainText("−0");
-  await expect(page.getByRole("region", { name: "VERDICT OUTPUT", exact: true })).toContainText("REVIEW");
+  await expect(page.getByRole("region", { name: "Important checks", exact: true })).toContainText("REVIEW");
   const finding = report.findings.find((item) => item.category === "selling")!;
   const citations = rules.getByRole("link", { name: /^Evidence / });
   expect(await citations.count()).toBe(finding.evidenceIds.length);
@@ -404,7 +350,7 @@ test("synthetic linked-selling verdict retains exact supporting citations withou
   const target = page.locator(`[id="evidence-${linkedIds.at(-1)!}"]`);
   await expect(target).toBeFocused();
   await page.setViewportSize({ width: 375, height: 812 }); await assertNoPageOverflow(page);
-  await scrollForCapture(page.getByRole("region", { name: "VERDICT OUTPUT", exact: true }));
+  await scrollForCapture(page.getByRole("region", { name: "Important checks", exact: true }));
   await page.screenshot({ path: ".next/investigation-verdict-mobile.png" });
 });
 
@@ -453,27 +399,22 @@ test("shared token links prefill one valid address without automatically running
 test("synthetic browser fixture: human explanation cites retained evidence and discloses model context", async ({ page }) => {
   await mockCompletedReport(page);
   const report = getBrowserReportFixture();
-  const explanation = page.getByRole("region", { name: "Explanation in plain English", exact: true });
-  await expect(explanation.getByText(report.explanation.overview.text, { exact: true })).toBeVisible();
-  const supporting = explanation.getByText(`Supporting observations (${report.explanation.observations.length})`, { exact: true }).locator("..");
+  const explanation = page.getByRole("region", { name: "Report assessment", exact: true });
+  await expect(explanation.getByText(report.explanation.overview.text, { exact: true })).toHaveCount(0);
+  const supporting = explanation.getByText("Supporting evidence", { exact: true }).locator("..");
   await expect(supporting).toHaveJSProperty("open", false);
-  await expect(explanation.getByText("Report details", { exact: true }).locator("..")).toHaveJSProperty("open", false);
-  await expect(explanation.locator('dl[aria-label="Engine and LLM roles"]')).not.toBeVisible();
-  await expect(explanation.locator('dl[aria-label="AI review receipt"]')).not.toBeVisible();
+  await expect(explanation.locator('dl[aria-label="Engine and LLM roles"]')).toHaveCount(0);
+  await expect(explanation.locator('dl[aria-label="AI review receipt"]')).toHaveCount(0);
   for (const observation of report.explanation.observations) await expect(supporting.getByText(observation.claim, { exact: true })).not.toBeVisible();
   await supporting.locator("summary").click();
   for (const observation of report.explanation.observations) {
     await expect(explanation.getByText(observation.claim, { exact: true })).toBeVisible();
     await expect(explanation).toContainText(observation.caveat);
   }
-  await page.getByText("Website source and investigator details", { exact: true }).click();
-  const audit = page.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Website source and investigator details$/ }) });
-  await expect(audit).toContainText("Transfer history is partial. Funding history was examined for 2 of 3 eligible wallets.");
-  await expect(audit).toContainText("The explanation used 3 of 28 evidence records in this report; 25 were not supplied to the model.");
-  await expect(audit.getByRole("listitem").filter({ hasText: /^— Synthetic test explanation; no live model generated this text\.$/ })).toBeVisible();
-  await expect(audit).toContainText("on-chain-investigator / v1.0.0");
-  await expect(audit.getByText("synthetic-qwen3:4b-test-fixture", { exact: true })).toBeVisible();
-  await expect(audit.locator("time")).toHaveAttribute("datetime", report.explanation.generatedAt);
+  const checked = explanation.getByText("What was checked", { exact: true }).locator("..");
+  await checked.locator("summary").click();
+  await expect(checked).toContainText("AI explains the supplied findings");
+  await expect(checked).not.toContainText(report.explanation.model);
   const citation = explanation.getByRole("link", { name: "Evidence 1", exact: true }).last();
   const targetId = decodeURIComponent((await citation.getAttribute("href"))!.slice(1));
   await expect(page.locator(`[id="${targetId}"]`)).toHaveCount(0);
@@ -481,8 +422,8 @@ test("synthetic browser fixture: human explanation cites retained evidence and d
   await page.keyboard.press("Enter");
   const target = page.locator(`[id="${targetId}"]`);
   await expect(target).toBeFocused();
-  await target.getByText("Evidence provenance", { exact: true }).click();
-  await expect(target).toContainText("Source: Synthetic browser test fixture");
+  const record = report.evidence.find((record) => `evidence-${record.id}` === targetId)!;
+  await expect(target.getByRole("link", { name: "Inspect transaction", exact: true })).toHaveAttribute("href", `https://base.blockscout.com/tx/${record.transactionHash}`);
 });
 
 test("a completed payload without its required explanation cannot display a partial report", async ({ page }) => {
@@ -517,8 +458,8 @@ test("synthetic browser fixture: wallet graph filtering and finding links reveal
   await expect(target).toBeFocused();
   await expect(wallet).toHaveAttribute("aria-pressed", "false");
   expect(await page.evaluate(() => decodeURIComponent(location.hash.slice(1)))).toBe(targetId);
-  await target.getByText("Evidence provenance", { exact: true }).click();
-  await expect(target.getByText(`ID: ${targetId.replace(/^evidence-/, "")}`, { exact: false })).toBeVisible();
+  const record = getBrowserReportFixture().evidence.find((record) => `evidence-${record.id}` === targetId)!;
+  await expect(target.getByRole("link", { name: "Inspect transaction", exact: true })).toHaveAttribute("href", `https://base.blockscout.com/tx/${record.transactionHash}`);
   await page.getByRole("combobox", { name: "Finding category", exact: true }).selectOption("coverage");
   const findings = page.getByRole("region", { name: "Findings and their limits" });
   await expect(findings.locator("article")).toHaveCount(1);
@@ -550,13 +491,13 @@ test("synthetic browser fixture: partial history displays exact observed flows a
   await expect(activity).toContainText("Current holdings are unknown.");
   await expect(activity.getByRole("columnheader", { name: "Current balance", exact: true })).toHaveCount(1);
   await expect(activity.getByRole("cell", { name: "Current balance unknown", exact: true })).toHaveCount(getBrowserReportFixture().wallets.length);
-  await expect(activity.locator(`[title="Exact raw amount: ${browserFixture.exactAmount}"]`)).toHaveCount(1);
-  await expect(activity.locator(`[title="Exact raw amount: ${browserFixture.exactAmount}"] span`)).toHaveAttribute("aria-label", expect.stringContaining(browserFixture.exactAmount));
+  await expect(activity.locator(`[data-amount-raw="${browserFixture.exactAmount}"]`)).toHaveCount(1);
+  await expect(activity.locator(`[data-amount-raw="${browserFixture.exactAmount}"] span`)).toHaveAttribute("aria-label", /tokens$/);
   await expect(activity.getByRole("cell", { name: "Not assessed", exact: true })).toHaveCount(getBrowserReportFixture().wallets.length);
-  await page.getByText("Coverage and block identity", { exact: true }).click();
-  const coverage = page.locator("details").filter({ has: page.getByText("Coverage and block identity", { exact: true }) });
-  await expect(coverage.getByRole("listitem").filter({ hasText: /^— One eligible wallet and some transfer history were not examined\.$/ })).toBeVisible();
-  await expect(coverage.getByRole("listitem").filter({ hasText: /^— Synthetic browser test fixture; these addresses and events are fabricated\.$/ })).toBeVisible();
+  const coverage = page.locator("details[data-report-checks]");
+  await coverage.locator("summary").click();
+  await expect(coverage).toContainText("Some requested transaction history could not be read");
+  await expect(coverage).toContainText("Funding was examined for 2 of 3 eligible addresses");
 });
 
 test("synthetic website metadata exposes its source without claiming token ownership", async ({ page }) => {
@@ -589,14 +530,12 @@ test("synthetic website metadata exposes its source without claiming token owner
   await page.setViewportSize({ width: 375, height: 812 }); await assertNoPageOverflow(page);
   await scrollForCapture(identity); await page.screenshot({ path: ".next/investigation-market-mobile.png" });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.getByText("Website source and investigator details", { exact: true }).click();
-  const metadata = page.getByRole("region", { name: "Token website", exact: true });
-  await expect(metadata).toContainText("OWNERSHIP UNVERIFIED"); await expect(metadata).toContainText("A listing does not verify who controls the website or the token.");
-  await expect(metadata.locator("time")).toHaveAttribute("datetime", "2026-10-12T00:00:00.000Z");
-  await expect(metadata.getByRole("link", { name: "DEX Screener token-pair metadata", exact: true })).toHaveAttribute("href", report.token.webPresence.sourceUrl);
-  const website = metadata.getByRole("link", { name: "https://example.org/synthetic-token", exact: true });
-  await expect(website).toHaveAttribute("href", "https://example.org/synthetic-token"); await expect(website).toHaveAttribute("rel", "noopener noreferrer nofollow");
-  await metadata.getByText("Source pair references (1)", { exact: true }).click(); await expect(metadata.getByText(browserFixture.pool, { exact: true })).toBeVisible();
+  const references = page.getByRole("region", { name: "References", exact: true });
+  await expect(references.getByRole("link", { name: "DEX Screener metadata", exact: true })).toHaveAttribute("href", report.token.webPresence.sourceUrl);
+  await expect(references).toContainText(report.token.webPresence.checkedAt);
+  const website = identity.getByRole("link", { name: "example.org", exact: true });
+  await expect(website).toHaveAttribute("href", "https://example.org/synthetic-token");
+  await expect(website).toHaveAttribute("rel", "noopener noreferrer nofollow");
 });
 
 test("source-reported holder count and contract flags retain attribution and unknown checks", async ({ page }) => {
@@ -609,10 +548,12 @@ test("source-reported holder count and contract flags retain attribution and unk
   };
   await page.route("**/api/investigations", (route) => route.fulfill({ status: 200, contentType: "application/x-ndjson", body: JSON.stringify({ type: "report", report }) + "\n" }));
   await page.goto("/investigate"); await page.getByLabel("Base token contract").fill(browserFixture.token); await page.getByRole("button", { name: "Start investigation", exact: true }).click();
+  await inspectDetails(page);
   const market = page.getByRole("region", { name: "Market snapshot", exact: true }), holderMetric = market.locator("dt").filter({ hasText: /^Wallets shown$/ });
   await expect(holderMetric.locator("..").locator("dd > span:first-child")).toHaveText("—");
   await expect(market.getByText("GoPlus reports 13 holders; this separate source count is not pinned to the scan block.", { exact: true })).toBeVisible();
-  await expect(holderMetric).toHaveAttribute("title", /Verified positive EOA rows.*not a complete holder census/);
+  await expect(holderMetric.locator("..")).toContainText("Verified positive EOA rows");
+  await expect(holderMetric.locator("..")).toContainText("not a complete holder census");
   const contract = page.getByRole("region", { name: "Contract", exact: true });
   await expect(contract.getByRole("heading", { name: "GoPlus · source-reported checks", exact: true })).toBeVisible();
   for (const [label, value] of [["Honeypot flag", "No"], ["Proxy flag", "Yes"], ["Mintable flag", "Unknown"], ["Hidden owner flag", "Unknown"], ["Open source flag", "Yes"]]) {
@@ -620,7 +561,9 @@ test("source-reported holder count and contract flags retain attribution and unk
   }
   await expect(contract.getByText("Not assessed", { exact: true })).toHaveCount(1);
   await expect(contract.getByText("Source flags are not a guarantee of safety, renounced ownership or creator identity.", { exact: true })).toBeVisible();
-  await expect(contract.getByRole("link", { name: browserFixture.funder, exact: true })).toHaveAttribute("href", `https://basescan.org/address/${browserFixture.funder}`);
+  const creatorLink = contract.locator(`a[href="https://basescan.org/address/${browserFixture.funder}"]`);
+  await expect(creatorLink).toHaveText(`${browserFixture.funder.slice(0, 6)}…${browserFixture.funder.slice(-4)}`);
+  await expect(creatorLink).toHaveAttribute("rel", "noopener noreferrer nofollow");
   await expect(contract.getByRole("link", { name: "Powered by GoPlus", exact: true })).toHaveAttribute("href", "https://gopluslabs.io/");
   const logo = contract.getByRole("link", { name: "Powered by GoPlus", exact: true }).locator("img");
   await expect(logo).toHaveAttribute("src", "/providers/goplus-logo.png");
@@ -662,14 +605,15 @@ test("reference report facts show creator holdings, liquidity, groups and exclus
   report.token.securitySnapshot = { source: "goplus", status: "reported", checkedAt: report.generatedAt, sourceUrl: `https://api.gopluslabs.io/api/v1/token_security/8453?contract_addresses=${report.token.address}`, tokenAddress: report.token.address, chainId: 8453, holderCount: 13, creatorAddress: browserFixture.funder, checks: [{ id: "is_mintable", value: "yes" }] };
   await page.route("**/api/investigations", (route) => route.fulfill({ status: 200, contentType: "application/x-ndjson", body: JSON.stringify({ type: "report", report }) + "\n" }));
   await page.goto("/investigate"); await page.getByLabel("Base token contract").fill(browserFixture.token); await page.getByRole("button", { name: "Start investigation", exact: true }).click();
-  const verdict = page.getByRole("region", { name: "VERDICT OUTPUT", exact: true });
+  const verdict = page.getByRole("region", { name: "Important checks", exact: true });
   await expect(verdict).toContainText("CAUTION");
-  await verdict.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Details$/ }) }).locator("summary").first().click();
-  await expect(verdict).toContainText("85.39%");
-  await expect(verdict).toContainText("4/4 balances");
+  await verdict.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^What was checked$/ }) }).locator("summary").first().click();
+  await expect(verdict).toContainText("Creator holds 85.39% of float");
+  await expect(verdict).toContainText("4 of 4 candidate balances");
   await expect(verdict).not.toContainText("100%"); await expect(verdict).not.toContainText("READ COVERAGE");
-  await expect(verdict).toContainText("$3.69 reported liquidity in the selected pair");
-  await expect(verdict).toContainText("GoPlus reports minting capability");
+  await expect(verdict).toContainText("Thin liquidity ($3.69)");
+  await inspectDetails(page);
+  await expect(page.getByRole("region", { name: "Contract", exact: true })).toContainText("Mintable flag");
   const creator = page.getByRole("region", { name: "Deployer DNA", exact: true });
   await expect(creator).toContainText("Source-reported creator"); await expect(creator).toContainText("84.8%");
   await expect(creator).toContainText("Native funding sent: 2 retained records");
@@ -713,9 +657,9 @@ test("synthetic browser fixture: report fits 375px and production CSP permits ev
   const graph = page.getByRole("region", { name: "Observed relationships", exact: true });
   await graph.hover(); await assertNoPageOverflow(page);
   await page.emulateMedia({ reducedMotion: "reduce" }); await page.setViewportSize({ width: 375, height: 812 });
-  await page.getByText("Coverage and block identity", { exact: true }).click();
+  await page.locator("details[data-report-checks] > summary").click();
   await page.locator("summary").filter({ hasText: /^Transaction evidence \(/ }).click();
-  await page.getByText("Evidence provenance", { exact: true }).first().click();
+  await expect(page.getByRole("link", { name: "Inspect transaction", exact: true }).first()).toHaveAttribute("href", /^https:\/\/base\.blockscout\.com\/tx\/0x[0-9a-f]{64}$/);
   await assertNoPageOverflow(page);
   await page.getByText("Timeline and retained connections", { exact: true }).click();
   await page.getByRole("region", { name: "All retained connections", exact: true }).getByRole("link", { name: "Evidence 1", exact: true }).last().click();
@@ -752,7 +696,7 @@ test("a former saved report address has no report lookup and links to a fresh cr
   page.on("request", (request) => { if (/\/api\/investigations\//.test(request.url())) lookups.push(request.url()); });
   await page.goto(reportPath);
   await expect(page.getByRole("heading", { name: "Reports stay with you.", exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: /Start a fresh investigation/ })).toHaveAttribute("href", "/investigate");
+  await expect(page.getByRole("link", { name: "Open investigations", exact: true })).toHaveAttribute("href", "/investigate");
   await expect(page.getByRole("heading", { name: "Transaction evidence", exact: true })).toHaveCount(0);
   expect(lookups).toEqual([]);
 });
@@ -824,7 +768,10 @@ test("cancelling a question aborts its own request and clearing a report removes
   const chat = page.getByRole("region", { name: "Questions about this token", exact: true });
   await chat.getByLabel("Ask about the observed evidence").fill("Synthetic cancellable question"); await chat.getByRole("button", { name: "Ask investigator", exact: true }).click();
   await expect(chat.getByRole("status")).toBeVisible(); await chat.getByRole("button", { name: "Cancel question", exact: true }).click();
-  await expect(chat.getByRole("alert")).toHaveText("Question cancelled.");
+  const cancelled = chat.getByRole("alert", { name: "Request not completed", exact: true });
+  await expect(cancelled.getByText("Question cancelled.", { exact: true })).toBeVisible();
+  await expect(cancelled.getByRole("button", { name: "Retry question", exact: true })).toBeEnabled();
+  await expect(chat.locator("[data-chat-assistant], [data-chat-answer], [data-chat-avatar]")).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as { __syntheticQuestionCancelled: { aborted: boolean } }).__syntheticQuestionCancelled.aborted)).toBe(true);
   await page.evaluate(() => { (window as unknown as { __syntheticQuestionCancelled: { aborted: boolean } }).__syntheticQuestionCancelled.aborted = false; });
   await chat.getByLabel("Ask about the observed evidence").fill("Synthetic request cancelled by clearing the report"); await chat.getByRole("button", { name: "Ask investigator", exact: true }).click();
@@ -840,7 +787,7 @@ test("chat shows separate thinking bubbles and retries a failed social turn with
   const chat = page.getByRole("region", { name: "Questions about this token", exact: true }), conversation = chat.getByRole("list", { name: "Questions and answers", exact: true });
   const composer = chat.getByLabel("Ask about the observed evidence"), submit = chat.getByRole("button", { name: "Ask investigator", exact: true });
   await expect(conversation.getByRole("listitem")).toHaveCount(0);
-  await expect(chat.getByText("TraceForce AI", { exact: true })).toHaveCount(0);
+  await expect(chat.getByText("TraceForge AI", { exact: true })).toHaveCount(0);
   await composer.fill("hey"); await submit.click();
   await expect(chat.getByRole("status")).toHaveText("Reading report…");
   await expect(conversation.getByText("hey", { exact: true })).toBeVisible();
@@ -855,12 +802,20 @@ test("chat shows separate thinking bubbles and retries a failed social turn with
   await expect(chat.getByRole("status")).toHaveText("Reading report…"); await expect.poll(() => pending.length).toBe(1);
   await pending.shift()!.fulfill({ status: 400, json: { error: "Synthetic scope failure: this question could not be answered." } });
   const failedTurn = conversation.getByRole("listitem").filter({ has: page.getByText("do you know me?", { exact: true }) });
-  await expect(failedTurn.getByRole("alert")).toHaveText("Synthetic scope failure: this question could not be answered.");
-  await expect(failedTurn).toContainText("Response unavailable"); await expect(composer).toHaveValue("do you know me?");
+  const failedStatus = failedTurn.getByRole("alert", { name: "Request not completed", exact: true });
+  await expect(failedStatus.getByText("Synthetic scope failure: this question could not be answered.", { exact: true })).toBeVisible();
+  await expect(failedTurn.locator("[data-chat-assistant], [data-chat-answer], [data-chat-avatar]")).toHaveCount(0);
+  await expect(failedTurn.getByText("Response unavailable", { exact: true })).toHaveCount(0);
+  await expect(composer).toHaveValue("do you know me?");
+  await failedTurn.screenshot({ path: ".next/investigation-chat-no-answer-desktop.png" });
+  await page.setViewportSize({ width: 375, height: 812 }); await assertNoPageOverflow(page);
+  await failedTurn.screenshot({ path: ".next/investigation-chat-no-answer-mobile.png" });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await submit.click(); await expect.poll(() => pending.length).toBe(1);
   await expect(conversation.getByRole("listitem")).toHaveCount(2); await expect(failedTurn.getByRole("status")).toBeVisible();
   await pending.shift()!.fulfill({ status: 429, json: { error: "Synthetic quota failure: please try again later." } });
-  await expect(failedTurn.getByRole("alert")).toHaveText("Synthetic quota failure: please try again later.");
+  await expect(failedStatus.getByText("Synthetic quota failure: please try again later.", { exact: true })).toBeVisible();
+  await expect(failedTurn.locator("[data-chat-assistant], [data-chat-answer], [data-chat-avatar]")).toHaveCount(0);
   await failedTurn.getByRole("button", { name: "Retry question", exact: true }).click();
   await expect(failedTurn.getByRole("status")).toHaveText("Reading report…"); await expect.poll(() => pending.length).toBe(1);
   await pending.shift()!.fulfill({ status: 200, json: { answer: "Synthetic model response: I do not know your personal identity.", caveat: "", evidenceIds: [], needsFreshScan: false } });
@@ -971,7 +926,11 @@ test("cancel aborts the current stream without displaying a report", async ({ pa
     };
   });
   await page.goto("/investigate"); await page.getByLabel("Base token contract").fill(browserFixture.token); await page.getByRole("button", { name: "Start investigation", exact: true }).click();
-  await expect(page.getByRole("status")).toContainText("Synthetic fixture: collecting"); await page.getByRole("button", { name: "Cancel investigation", exact: true }).click();
+  const loading = page.locator("[data-scan-progress]");
+  await expect(loading).toHaveAttribute("data-scan-stage", "investigating");
+  await expect(loading.getByRole("status").locator("p")).toHaveText(["Checking the token", "Reviewing the available information."]);
+  await expect(loading).not.toContainText("Synthetic fixture: collecting");
+  await page.getByRole("button", { name: "Cancel investigation", exact: true }).click();
   await expect(page.getByRole("alert").filter({ hasText: "Investigation cancelled." })).toBeVisible(); await expect(page.getByRole("button", { name: "Start investigation", exact: true })).toBeEnabled();
   await expect(page.getByRole("heading", { name: "Your investigation report", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as { __syntheticStreamAborted: { aborted: boolean } }).__syntheticStreamAborted.aborted)).toBe(true);

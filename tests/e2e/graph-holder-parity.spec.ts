@@ -41,11 +41,11 @@ async function assertVisibleGraphMatchesTable(page: Page, denominator: string, l
   await expect(graph.getByRole("button", { name: "Wallets", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(canvas).toHaveAttribute("data-denominator-raw", denominator);
   await expect(canvas).toHaveAttribute("data-denominator-label", label);
-  const pinnedDenominator = page.getByRole("region", { name: "Top holders", exact: true }).locator(`[title="Exact raw denominator: ${denominator}"]`);
+  const pinnedDenominator = page.getByRole("region", { name: "Top holders", exact: true }).locator(`[data-holding-denominator-raw="${denominator}"]`);
   await expect(pinnedDenominator).toHaveCount(1);
   const rows = await table.locator("tbody tr").evaluateAll((elements) => elements.map((row) => {
     const cells = row.querySelectorAll("td"), button = cells[1].querySelector("button")!;
-    return { address: button.title.split("\n")[0], share: cells[2].textContent!.trim(), balance: button.title.match(/Pinned balance: (\d+) raw units/)![1] };
+    return { address: button.title.split("\n")[0], share: cells[2].textContent!.trim(), balance: button.getAttribute("data-balance-raw")! };
   }));
   const nodes = await canvas.locator('g[data-node-address][data-node-kind="holding"]').evaluateAll((elements) => elements.map((node) => ({
     address: node.getAttribute("data-node-address"), share: node.getAttribute("data-holding-share"),

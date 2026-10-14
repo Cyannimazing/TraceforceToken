@@ -1,81 +1,79 @@
 import Link from "next/link";
-import { ArrowDown, ArrowRight, ArrowUpRight, Blocks, Bot, GitBranch, ScanLine, ShieldCheck, Wallet } from "lucide-react";
-import { InvestigationHeader } from "@/components/site-shell";
-import { BackgroundBeamsWithCollision } from "@/components/ui/background-beams-with-collision";
-import { BentoGrid, BentoGridItem } from "@/components/ui/bento-grid";
-import { TraceMotionProvider } from "@/components/ui/motion-preferences";
+import { ArrowDown, ArrowRight, ArrowUpRight, GitBranch, ScanLine, Wallet, Waves } from "lucide-react";
+import { SiteFooter, SiteHeader } from "@/components/site-shell";
 import { createMetadata } from "@/lib/seo";
+import "@/components/traceforge-pages.css";
 
 export const metadata = createMetadata({
-  title: "On-chain investigation, backed by evidence",
-  description: "TraceForce Engine investigates Base tokens through public on-chain evidence, tracing wallet funding, connections, early accumulation and coordinated selling.",
+  title: "Follow the evidence",
+  description: "Investigate Base tokens with TraceForge. Follow wallet funding, understand connections, and get a clear explanation of the evidence behind the activity.",
   path: "/",
 });
 
 const questions = [
-  { number: "01", label: "FUNDING PROVENANCE", icon: Wallet, title: "Who funded the wallets?", description: "Trace observed native funding into examined wallets, with the transactions and time window behind each relationship.", detail: "Follow the source" },
-  { number: "02", label: "WALLET CONNECTIONS", icon: GitBranch, title: "Which wallets are connected?", description: "Examine shared funding and direct transfers. Inspect why addresses are linked and where those links remain uncertain.", detail: "Connect the activity" },
-  { number: "03", label: "EARLY ACCUMULATION", icon: Blocks, title: "Who accumulated early?", description: "Reconstruct token inflows in the earliest examined interval. See the receipts without mistaking a partial window for token launch.", detail: "Reconstruct the timeline" },
-  { number: "04", label: "COORDINATED SELLING", icon: ScanLine, title: "What suggests a coordinated exit?", description: "Compare supported selling across previously connected wallets. Distinguish verified swaps from outgoing transfers.", detail: "Examine the evidence" },
+  { number: "01", label: "FOLLOW THE FUNDING", icon: Wallet, title: "Where did the money come from?", description: "Follow the observed funding into a wallet. Open the transactions that connect it to the source." },
+  { number: "02", label: "CONNECT THE WALLETS", icon: GitBranch, title: "Are these wallets connected?", description: "Find shared funding and transfers. See the reason for each link, without treating a connection as proof of one owner." },
+  { number: "03", label: "RECONSTRUCT THE ACTIVITY", icon: ScanLine, title: "Who got in early?", description: "Explore accumulation in the period examined. Understand what happened before the activity you see today." },
+  { number: "04", label: "EXAMINE THE EXITS", icon: Waves, title: "What does the selling reveal?", description: "Look at supported sales and previously linked wallets. Separate actual trades from tokens simply moving around." },
 ];
 
+function NetworkIllustration() {
+  const pixels = Array.from({ length: 112 }, (_, index) => {
+    const column = index % 14, row = Math.floor(index / 14);
+    return { x: 125 + column * 22, y: 60 + row * 22, size: 8 + ((column * 7 + row * 11) % 13), visible: (column + row * 3) % 5 !== 0 };
+  });
+  return <figure className="tf-hero-art" aria-labelledby="tf-network-caption">
+    <svg className="tf-network-illustration" viewBox="0 0 560 480" fill="none" aria-hidden="true">
+      <defs><linearGradient id="tf-pixel-spectrum" x1="140" y1="70" x2="430" y2="250" gradientUnits="userSpaceOnUse"><stop className="tf-stop-cobalt" /><stop offset=".43" className="tf-stop-cyan" /><stop offset=".72" className="tf-stop-violet" /><stop offset="1" className="tf-stop-coral" /></linearGradient></defs>
+      <g className="tf-art-orbit"><path d="M38 275H120V353H255V417H438V344H508M85 217H168V302H332V252H473V158H524" /><path d="M168 302V379H91M332 252V179H390V115M255 417V448H340M438 344H381V302" /><rect x="32" y="269" width="12" height="12" /><rect x="114" y="347" width="12" height="12" /><rect x="249" y="411" width="12" height="12" /><rect x="432" y="338" width="12" height="12" /><rect x="502" y="338" width="12" height="12" /><rect x="162" y="296" width="12" height="12" /><rect x="326" y="246" width="12" height="12" /><rect x="467" y="152" width="12" height="12" /><rect x="384" y="109" width="12" height="12" /></g>
+      <g className="tf-art-pixels" fill="url(#tf-pixel-spectrum)">{pixels.filter((pixel) => pixel.visible).map((pixel, index) => <rect key={index} x={pixel.x} y={pixel.y} width={pixel.size} height={pixel.size} className={["tf-pixel", "tf-pixel-phase-" + index % 4].join(" ")} />)}</g>
+      <g className="tf-art-signals"><rect x="162" y="296" width="12" height="12" /><rect x="326" y="246" width="12" height="12" /><rect x="432" y="338" width="12" height="12" /></g>
+      <path className="tf-art-trace" d="M38 275H120V353H255V417H438V344H508" pathLength="100" />
+    </svg>
+    <figcaption id="tf-network-caption"><span className="tf-mini-square" />Illustrative network · your report uses acquired evidence</figcaption>
+  </figure>;
+}
+
 export default function Home() {
-  return <TraceMotionProvider><div className="engine-shell engine-home">
-    <InvestigationHeader active="home" />
+  return <div className="tf-public tf-home">
+    <SiteHeader active="home" />
     <main id="main-content">
-      <section className="engine-container pt-12 sm:pt-20" aria-labelledby="hero-title">
-        <div className="grid items-center gap-10 lg:grid-cols-[1fr_1.08fr] lg:gap-14">
-          <div>
-            <p className="engine-kicker flex items-center gap-2"><ScanLine size={14} aria-hidden="true" />ON-CHAIN INVESTIGATION / BASE</p>
-            <h1 id="hero-title" className="mt-6 text-[clamp(2.8rem,5.5vw,5rem)] leading-[1.04] font-semibold tracking-[-.05em] text-balance">Every token<br />leaves a <span className="text-accent">trail.</span></h1>
-            <p className="mt-6 max-w-lg text-base leading-8 text-muted sm:text-lg">Trace the funding. Connect the wallets. Reconstruct the activity behind the token.</p>
-            <div className="mt-8 flex flex-wrap items-center gap-x-7 gap-y-3">
-              <Link className="engine-button engine-button-primary" href="/investigate">Investigate a token <ArrowUpRight size={18} aria-hidden="true" /></Link>
-              <Link className="inline-flex min-h-11 items-center gap-2 text-sm text-muted hover:text-accent" href="/methodology">Explore the methodology <ArrowRight size={16} aria-hidden="true" /></Link>
-            </div>
-            <div className="mt-8 flex flex-wrap gap-x-5 gap-y-2 font-mono text-[11px] text-muted"><span className="flex items-center gap-2"><ShieldCheck size={14} className="text-accent" aria-hidden="true" />Read-only public data</span><span>No wallet connection</span></div>
-          </div>
-          <BentoGridItem className="border-accent/25">
-            <figure aria-labelledby="laser-concept-title">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4 font-mono text-[10px] tracking-wider"><span id="laser-concept-title" className="flex items-center gap-2 text-accent"><Bot size={16} aria-hidden="true" />LASER / TRACE ENGINE</span><span className="text-muted">CONCEPT VIEW</span></div>
-              <BackgroundBeamsWithCollision className="aspect-[3/2] h-auto w-full" />
-              <figcaption className="border-t border-border px-5 py-4 text-xs leading-6 text-muted">Illustrative paths. The report shows the transactions and verified balances collected for your token.</figcaption>
-            </figure>
-          </BentoGridItem>
+      <section className="tf-container tf-hero" aria-labelledby="hero-title">
+        <div className="tf-hero-copy">
+          <p className="tf-eyebrow"><span className="tf-mini-square" />ON-CHAIN INVESTIGATION · BASE</p>
+          <h1 id="hero-title">Every token<br />has a <em>story.</em></h1>
+          <p className="tf-hero-description">Follow the money. Understand the connections.<br className="tf-desktop-break" /> Get a clearer picture of what you’re looking at.</p>
+          <div className="tf-actions"><Link className="tf-button tf-button-primary" href="/investigate">Investigate a token <ArrowUpRight size={18} aria-hidden="true" /></Link><Link className="tf-text-link" href="/methodology">How it works <ArrowRight size={16} aria-hidden="true" /></Link></div>
+          <p className="tf-hero-note">Public data. No wallet connection.</p>
         </div>
-        <div className="mt-10 flex flex-wrap items-center justify-between gap-4 border-t border-border py-6 text-xs text-muted sm:mt-14"><p>Public records. Connected evidence. A clearer story.</p><a href="#approach" className="inline-flex min-h-11 items-center gap-3 hover:text-accent">Follow the evidence <ArrowDown size={15} aria-hidden="true" /></a></div>
+        <NetworkIllustration />
+        <div className="tf-hero-bottom"><p>A trail worth understanding.</p><a className="tf-text-link" href="#approach">Explore the possibilities <ArrowDown size={16} aria-hidden="true" /></a></div>
       </section>
 
-      <section className="questions-section border-y border-border" id="approach" aria-labelledby="questions-title">
-        <div className="engine-container">
-          <div className="mb-8 grid gap-5 lg:grid-cols-2 lg:items-end lg:gap-14">
-            <div><p className="engine-kicker">FOUR LINES OF INQUIRY</p><h2 id="questions-title" className="mt-4 text-3xl leading-tight font-semibold tracking-tight sm:text-4xl">The story behind<br /><span className="text-muted">the token.</span></h2></div>
-            <p className="max-w-lg text-sm leading-7 text-muted sm:text-base">Start with a token address. Inspect its observed activity, wallet relationships and the evidence behind each finding.</p>
-          </div>
-          <BentoGrid className="max-w-none gap-4 md:auto-rows-auto md:grid-cols-2 sm:gap-6">
-            {questions.map(({ number, label, icon: Icon, title, description, detail }) => <BentoGridItem as="article" className="question-card" key={number}>
-              <div className="flex items-center justify-between gap-4"><p className="question-label"><span>{number}</span>{label}</p><Icon size={24} strokeWidth={1.4} className="text-accent" aria-hidden="true" /></div>
-              <h3 className="mt-6">{title}</h3><p>{description}</p><span className="mt-7 flex items-center gap-3 text-xs text-accent">{detail}<ArrowRight size={14} aria-hidden="true" /></span>
-            </BentoGridItem>)}
-          </BentoGrid>
+      <section className="questions-section tf-section" id="approach" aria-labelledby="questions-title">
+        <div className="tf-container">
+          <div className="tf-section-intro"><div><p className="tf-eyebrow">START WITH BETTER QUESTIONS</p><h2 id="questions-title">Look beyond<br /><em>the price.</em></h2></div><p>A token address opens a trail of activity. TraceForge brings the important parts together, with evidence you can explore.</p></div>
+          <div className="tf-question-grid">{questions.map(({ number, label, icon: Icon, title, description }) => <article className="question-card tf-question" key={number}>
+            <div className="tf-question-top"><p className="question-label"><span>{number}</span>{label}</p><Icon size={24} strokeWidth={1.3} aria-hidden="true" /></div>
+            <h3>{title}</h3><p>{description}</p><Link href="/investigate" className="tf-question-link" aria-label={"Investigate: " + title}><ArrowUpRight size={22} strokeWidth={1.4} aria-hidden="true" /></Link>
+          </article>)}</div>
         </div>
       </section>
 
-      <section className="engine-container py-14 sm:py-20" aria-labelledby="llm-title">
-        <BentoGridItem as="section" className="p-6 sm:p-9">
-          <div className="grid gap-8 lg:grid-cols-[1fr_1.05fr] lg:gap-14">
-            <div><p className="engine-kicker flex items-center gap-2"><Bot size={16} aria-hidden="true" />TRACEFORCE / AI</p><h2 id="llm-title" className="mt-5 text-3xl leading-tight font-semibold tracking-tight">Evidence first.<br /><span className="text-accent">AI explains the trail.</span></h2><p className="mt-5 max-w-lg text-sm leading-7 text-muted">AI reviews the collected findings and answers questions about this scan, using a local model or a configured Gemini fallback. Explanations link back to evidence and keep missing data visible.</p><Link className="mt-6 inline-flex min-h-11 items-center gap-2 text-sm text-accent" href="/data-sources">Explore data sources <ArrowUpRight size={16} aria-hidden="true" /></Link></div>
-            <ol className="flex flex-col justify-center divide-y divide-border">
-              {[
-                ["01", "Read", "Collect public on-chain activity in a pinned block window."],
-                ["02", "Reconstruct", "Link funding, transfers and supported selling with exact transaction references."],
-                ["03", "Explain", "Review the findings with the LLM, then ask follow-up questions."],
-              ].map(([number, title, description]) => <li key={number} className="flex gap-5 py-5"><span className="pt-1 font-mono text-xs text-accent">{number}</span><div><h3 className="font-semibold">{title}</h3><p className="mt-2 text-sm leading-6 text-muted">{description}</p></div></li>)}
-            </ol>
-          </div>
-        </BentoGridItem>
+      <section className="tf-container tf-section tf-process" aria-labelledby="process-title">
+        <div className="tf-section-intro"><div><p className="tf-eyebrow">FROM ADDRESS TO UNDERSTANDING</p><h2 id="process-title">A little less noise.<br /><em>A clearer trail.</em></h2></div><Link className="tf-text-link" href="/methodology">Inside the method <ArrowUpRight size={16} aria-hidden="true" /></Link></div>
+        <ol className="tf-process-steps">{[
+          ["01", "Find the signals", "Collect public activity and source context for the token you’re examining."],
+          ["02", "Check the evidence", "Inspect transactions, wallet balances and the basis for reported relationships."],
+          ["03", "Make it understandable", "Read a direct explanation of the findings, then ask about the details that matter to you."],
+        ].map(([number, title, description]) => <li key={number}><span className="tf-step-node">{number}</span><h3>{title}</h3><p>{description}</p></li>)}</ol>
       </section>
+
+      <section className="tf-interpretation" aria-labelledby="explanation-title"><div className="tf-container tf-interpretation-inner"><div><p className="tf-eyebrow">AI, WITH SOMETHING TO SAY</p><h2 id="explanation-title">Human language.<br /><em>Traceable reasons.</em></h2><p>Start with the conclusion and why it matters. Open the supporting details when you want to go deeper.</p><Link className="tf-text-link" href="/investigate">Follow a token’s story <ArrowUpRight size={16} aria-hidden="true" /></Link></div><div className="tf-example"><p className="tf-eyebrow">EXAMPLE EXPLANATION · ILLUSTRATIVE</p><blockquote>“One wallet holds most of the tokens available to trade. A large sale could move the price sharply.”</blockquote><span className="tf-example-rule" /><p>Your report explains the acquired findings. Missing evidence stays visible.</p></div></div></section>
+
+      <section className="tf-container tf-source-strip" aria-labelledby="sources-title"><div><p className="tf-eyebrow">KNOW THE SOURCE</p><h2 id="sources-title">Connected data. Clear attribution.</h2></div><div className="tf-source-names" aria-label="Core data providers"><span>Alchemy</span><span>SWARM</span><span>GoPlus</span><span>DEX Screener</span></div><Link className="tf-text-link" href="/data-sources">Explore data sources <ArrowUpRight size={16} aria-hidden="true" /></Link></section>
+      <section className="tf-container tf-closing"><span className="tf-closing-square" aria-hidden="true" /><h2>Find the story<br /><em>behind the address.</em></h2><Link className="tf-button tf-button-primary" href="/investigate">Start an investigation <ArrowUpRight size={18} aria-hidden="true" /></Link></section>
     </main>
-    <footer className="engine-container flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-t border-border py-6 text-xs leading-6 text-muted"><p>TraceForce Engine / Public evidence. Clear limits.</p><nav aria-label="Footer navigation" className="flex flex-wrap gap-5"><Link className="inline-flex min-h-11 items-center hover:text-accent" href="/methodology">Methodology</Link><Link className="inline-flex min-h-11 items-center hover:text-accent" href="/data-sources">Data sources</Link></nav></footer>
-  </div></TraceMotionProvider>;
+    <SiteFooter />
+  </div>;
 }

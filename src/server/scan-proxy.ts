@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { z } from "zod";
 import type { ScanEngineConfiguration } from "@/config/scan-engine";
 import type { InvestigationReport, ScanParameters } from "@/domain/investigations/types";
-import { MAX_SCAN_REPORT_BYTES, MAX_SCAN_STREAM_BYTES, SCAN_RESPONSE_HEADERS, type ScanEvent } from "@/domain/investigations/scan";
+import { AI_RATE_LIMIT_SCAN_MESSAGE, MAX_SCAN_REPORT_BYTES, MAX_SCAN_STREAM_BYTES, SCAN_RESPONSE_HEADERS, type ScanEvent } from "@/domain/investigations/scan";
 import { sameInvestigationAnalysis, validateBaseInvestigationReport, validateExplainedReport } from "@/domain/investigations/report-validation";
 import { createDeadline } from "@/lib/deadline";
 import { HttpError } from "@/lib/http";
@@ -13,7 +13,7 @@ const envelope = z.discriminatedUnion("type", [
   z.object({ type: z.literal("progress"), stage: z.string().min(1).max(160).regex(/^[^\x00-\x1f\x7f]+$/) }).strict(),
   z.object({ type: z.literal("analysis"), report: z.unknown() }).strict(),
   z.object({ type: z.literal("report"), report: z.unknown(), chatContext: z.string().min(1).max(32768).optional() }).strict(),
-  z.object({ type: z.literal("error"), error: z.string().max(1024) }).strict(),
+  z.object({ type: z.literal("error"), error: z.string().max(1024), code: z.literal("AI_RATE_LIMITED").optional() }).strict(),
 ]);
 
 async function abortable<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -79,7 +79,8 @@ export async function proxyScanResponse(parameters: ScanParameters, configuratio
           if (report.token.address !== parameters.token || (analysis && !sameInvestigationAnalysis(analysis, report))) throw new Error("Mismatched scan report.");
           emit({ type: "report", report, ...(event.chatContext ? { chatContext: event.chatContext } : {}) }); ended = true;
         } else if (event.type === "error") {
-          emit({ type: "error", error: "The investigation could not finish. Please try again shortly." }); ended = true;
+          emit(event.code === "AI_RATE_LIMITED" ? { type: "error", code: "AI_RATE_LIMITED", error: AI_RATE_LIMIT_SCAN_MESSAGE }
+            : { type: "error", error: "The investigation could not finish. Please try again shortly." }); ended = true;
         } else emit(event);
       };
       void (async () => {

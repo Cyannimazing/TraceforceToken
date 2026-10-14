@@ -13,6 +13,8 @@ import { boundedJson, createProviderTransport } from "../../src/providers/base/t
 import { collectNativeFundingPrefix, type NativeFundingOptions } from "../../src/providers/base/native-funding";
 import { ProviderLogRangeError, TokenContractNotFoundError } from "../../src/providers/base/errors";
 import type { TokenTransferPageReader } from "../../src/providers/base/alchemy-transfers";
+import { BASE_V3_QUOTER_V2 } from "../../src/domain/investigations/exit-quote";
+import { exitQuoteAbi } from "../../src/providers/base/exit-quote";
 
 const address = (byte: string) => `0x${byte.repeat(40 / byte.length)}` as Address;
 const hash = (byte: string) => `0x${byte.repeat(64 / byte.length)}` as Hash;
@@ -706,6 +708,157 @@ test("indexed handshake and pages share the phase budget and cannot consume the 
   assert.equal(canonicalReads, 1, "the reserved final pinned-end check must still run");
 });
 
+test("authenticated fixed-lane holder balances run in bounded parallel batches at the pinned block and count every physical read", async () => {
+  const source = withAdditionalParticipants(fixture({ noSwap: true }), 6);
+  const calls: { lane: string; method: string; params: unknown[] }[] = [];
+  const checked = new Set<string>();
+  let active = 0, maximumActive = 0, recoveries = 0;
+  const dataset = await collectBaseInvestigation(parameters, { ...source, limits: { callBudget: 80 },
+    rpc: async (method, params) => {
+      calls.push({ lane: "primary", method, params });
+      if (method === "eth_call" && (params[0] as { data: string }).data.startsWith("0x70a08231")) assert.fail("authenticated balances must use the fixed lane");
+      return source.rpc(method, params);
+    },
+    indexedRpc: async (method, params) => {
+      calls.push({ lane: "fixed", method, params });
+      if (method !== "eth_call") return source.rpc(method, params);
+      const request = params[0] as { to: Address; data: string };
+      assert.equal(request.to, token);
+      assert.ok(request.data.startsWith("0x70a08231"));
+      assert.equal(params[1], "0x64", "concurrent reads cannot drift to latest state");
+      checked.add(`0x${request.data.slice(-40)}`);
+      active++; maximumActive = Math.max(maximumActive, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active--;
+      return `0x${1n.toString(16).padStart(64, "0")}`;
+    },
+    transferPage: async () => { calls.push({ lane: "index", method: "transfers", params: [] }); return { items: [{ hash: mintHash, blockNumber: "99" }, { hash: saleHash, blockNumber: "100" }], nextCursor: null }; },
+    holderPage: async () => { calls.push({ lane: "index", method: "holders", params: [] }); return { items: [{ address: unrelated }], nextCursor: null }; },
+    fundingHistory: async () => { calls.push({ lane: "index", method: "funding", params: [] }); return { items: [], nextCursor: null }; },
+    recoverRpc: () => { recoveries++; return true; },
+  });
+  assert.equal(maximumActive, 4);
+  assert.equal(active, 0);
+  assert.equal(recoveries, 0, "fixed-lane batches must not enter mutable primary recovery");
+  assert.equal(dataset.holderSnapshot!.balances.status, "complete");
+  assert.equal(checked.size, 9);
+  assert.deepEqual([...checked].sort(), dataset.holderSnapshot!.holders.map((row) => row.address));
+  assert.ok(dataset.holderSnapshot!.holders.every((row) => row.status === "verified" && row.balanceRaw === "1"));
+  assert.deepEqual(calls.filter((call) => call.lane === "fixed" && call.method !== "eth_call").map(({ method, params }) => ({ method, params })), [
+    { method: "eth_chainId", params: [] },
+    { method: "eth_getBlockByNumber", params: ["0x63", false] },
+    { method: "eth_getBlockByNumber", params: ["0x64", false] },
+  ]);
+  assert.ok(calls.length <= 80);
+  assert.deepEqual(calls.at(-1), { lane: "primary", method: "eth_getBlockByNumber", params: ["0x64", false] });
+  assert.doesNotThrow(() => validateBaseInvestigationReport(analyzeInvestigation(dataset, { id: "00000000-0000-4000-8000-000000000020", generatedAt: "2026-10-12T00:00:00.000Z" })));
+});
+
+test("parallel fixed-lane balances exhaust only their shared allocation and leave the final canonical read reserved", async () => {
+  const source = withAdditionalParticipants(fixture({ noSwap: true }), 30);
+  const calls: { lane: string; method: string; params: unknown[] }[] = [];
+  let balanceReads = 0, active = 0, maximumActive = 0;
+  const dataset = await collectBaseInvestigation(parameters, { ...source, limits: { callBudget: 40 },
+    rpc: async (method, params) => { calls.push({ lane: "primary", method, params }); return source.rpc(method, params); },
+    indexedRpc: async (method, params) => {
+      calls.push({ lane: "fixed", method, params });
+      if (method !== "eth_call") return source.rpc(method, params);
+      assert.equal(params[1], "0x64");
+      balanceReads++; active++; maximumActive = Math.max(maximumActive, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active--;
+      return `0x${1n.toString(16).padStart(64, "0")}`;
+    },
+    transferPage: async () => { calls.push({ lane: "index", method: "transfers", params: [] }); return { items: [{ hash: mintHash, blockNumber: "99" }, { hash: saleHash, blockNumber: "100" }], nextCursor: null }; },
+    holderPage: async () => { calls.push({ lane: "index", method: "holders", params: [] }); return { items: [{ address: unrelated }], nextCursor: null }; },
+    fundingHistory: async () => { calls.push({ lane: "index", method: "funding", params: [] }); return { items: [], nextCursor: null }; },
+  });
+  assert.ok(maximumActive > 1 && maximumActive <= 4);
+  assert.equal(calls.length, 40, "all physical attempts, index pages, and final verification share one cap");
+  assert.equal(active, 0);
+  assert.equal(dataset.holderSnapshot!.balances.status, "partial");
+  assert.equal(dataset.holderSnapshot!.balances.verifiedWallets, balanceReads);
+  assert.ok(balanceReads > 0 && balanceReads < dataset.holderSnapshot!.holders.length);
+  assert.ok(dataset.holderSnapshot!.holders.filter((row) => row.status === "not_examined").every((row) => row.balanceRaw === null));
+  assert.deepEqual(calls.at(-1), { lane: "primary", method: "eth_getBlockByNumber", params: ["0x64", false] });
+});
+
+test("a candidate cohort larger than the call budget receives real classification and funding reads while retaining bounded balances and canonical verification", async () => {
+  const source = withAdditionalParticipants(creationFixture().dependencies, 100), externalLead = address("77");
+  const calls: { lane: string; method: string; params: unknown[] }[] = [];
+  const classified: Address[] = [], fundingQueries: Address[] = [], balanceQueries = new Set<string>();
+  const dataset = await collectBaseInvestigation(parameters, { ...source, limits: { callBudget: 80 }, fundingIndexSource: "alchemy",
+    candidateAddresses: async () => [externalLead],
+    rpc: async (method, params) => {
+      calls.push({ lane: "primary", method, params });
+      if (method === "eth_getCode" && params[0] !== token) { assert.equal(params[1], "0x64"); classified.push(params[0] as Address); }
+      if (method === "eth_getTransactionCount") { assert.equal(params[1], "0x64"); return "0x2"; }
+      return source.rpc(method, params);
+    },
+    indexedRpc: async (method, params) => {
+      calls.push({ lane: "fixed", method, params });
+      if (method !== "eth_call") return source.rpc(method, params);
+      assert.equal(params[1], "0x64");
+      const request = params[0] as { to: Address; data: string };
+      assert.equal(request.to, token); assert.ok(request.data.startsWith("0x70a08231"));
+      balanceQueries.add(`0x${request.data.slice(-40)}`);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return `0x${1n.toString(16).padStart(64, "0")}`;
+    },
+    transferPage: async () => { calls.push({ lane: "index", method: "transfers", params: [] }); return { items: [{ hash: mintHash, blockNumber: "99" }, { hash: saleHash, blockNumber: "100" }], nextCursor: null }; },
+    holderPage: async () => { calls.push({ lane: "index", method: "holders", params: [] }); return { items: [{ address: unrelated }], nextCursor: null }; },
+    fundingHistory: async (target, _cursor, range) => {
+      calls.push({ lane: "index", method: "funding", params: [target] }); fundingQueries.push(target);
+      assert.deepEqual(range, { fromBlock: "99", toBlock: "100" });
+      return { items: [], nextCursor: null };
+    },
+  });
+  assert.ok(dataset.holderSnapshot!.holders.length > 80, "this fixture must exceed the entire physical request budget");
+  assert.deepEqual(classified.slice(0, 3), [funder, unrelated, externalLead], "verified creator and discovery leads receive examinations without presumed balances");
+  assert.deepEqual(fundingQueries.slice(0, 3), [funder, unrelated, externalLead]);
+  assert.ok(classified.length > 0 && fundingQueries.length > 0 && balanceQueries.size > 0);
+  assert.equal(dataset.coverage.examinedWallets, fundingQueries.length);
+  assert.ok(dataset.coverage.funding.some((row) => row.status === "not_examined"));
+  assert.equal(dataset.coverage.funding.length, dataset.coverage.eligibleWallets);
+  assert.equal(dataset.walletActivitySnapshot!.rows.length, dataset.coverage.eligibleWallets);
+  assert.ok(dataset.walletActivitySnapshot!.rows.some((row) => row.code === "eoa"));
+  assert.ok(dataset.walletActivitySnapshot!.rows.some((row) => row.code === "unavailable" && row.outgoingTransactionCountRaw === null));
+  assert.equal(dataset.holderSnapshot!.balances.status, "partial");
+  assert.equal(dataset.holderSnapshot!.balances.verifiedWallets, balanceQueries.size);
+  assert.ok(dataset.holderSnapshot!.holders.some((row) => row.status === "not_examined" && row.balanceRaw === null));
+  assert.equal(dataset.holderSnapshot!.holders.find((row) => row.address === externalLead)!.balanceRaw, null, "prioritizing a source lead must not invent its unexamined holding");
+  const verifiedPositive = new Set(dataset.holderSnapshot!.holders.filter((row) => row.status === "verified" && row.balanceRaw !== null && BigInt(row.balanceRaw) > 0n).map((row) => row.address));
+  assert.ok(dataset.walletActivitySnapshot!.rows.some((row) => row.code === "eoa" && verifiedPositive.has(row.address)), "the budget must permit an independently classified positive wallet");
+  assert.equal(calls.length, 80);
+  assert.deepEqual(calls.at(-1), { lane: "primary", method: "eth_getBlockByNumber", params: ["0x64", false] });
+  assert.ok(dataset.coverage.warnings.some((warning) => /cohort exceeds the remaining call budget/.test(warning)));
+  assert.doesNotThrow(() => validateBaseInvestigationReport(analyzeInvestigation(dataset, { id: "00000000-0000-4000-8000-000000000020", generatedAt: "2026-10-12T00:00:00.000Z" })));
+});
+
+test("an index callback without its authenticated discovery handshake cannot enable parallel primary balance recovery", async () => {
+  const source = withAdditionalParticipants(fixture({ noSwap: true }), 6);
+  let indexedReads = 0, active = 0, maximumActive = 0, balanceReads = 0;
+  const dataset = await collectBaseInvestigation(parameters, { ...source, limits: { callBudget: 80 },
+    indexedRpc: async () => { indexedReads++; assert.fail("an unused discovery lane must not be trusted for balances"); },
+    holderPage: async () => ({ items: [{ address: unrelated }], nextCursor: null }),
+    fundingHistory: async () => ({ items: [], nextCursor: null }),
+    rpc: async (method, params) => {
+      if (method === "eth_call" && (params[0] as { data: string }).data.startsWith("0x70a08231")) {
+        assert.equal(params[1], "0x64");
+        balanceReads++; active++; maximumActive = Math.max(maximumActive, active);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        active--;
+        return `0x${1n.toString(16).padStart(64, "0")}`;
+      }
+      return source.rpc(method, params);
+    },
+  });
+  assert.equal(indexedReads, 0);
+  assert.equal(maximumActive, 1);
+  assert.equal(balanceReads, 9);
+  assert.equal(dataset.holderSnapshot!.balances.status, "complete");
+});
+
 test("cancellation during indexed handshake or page resolution propagates before subsequent reads", async () => {
   for (const location of ["handshake", "page"]) {
     const source = fixture({ noSwap: true });
@@ -1209,6 +1362,51 @@ test("collector joins holder candidates into funding coverage and verifies pinne
   assert.equal(report.evidence.filter((item) => item.kind === "transfer").length, 3);
 });
 
+test("priority wallet activity stays within its row limit after candidates are reordered lexically", async () => {
+  const source = fixture({ hugeAmount: 10_000n });
+  const priorityHolder = address("ff");
+  const recipients = Array.from({ length: 2000 }, (_, index) => `0x${(index + 1).toString(16).padStart(40, "0")}` as Address);
+  const receiptHashes = [hash("da"), hash("db")];
+  const logs = recipients.map((recipient, index) => transferLog(receiptHashes[index < 1000 ? 0 : 1], index < 1000 ? wallet : recipients[index - 1000], recipient, 1n, token, index < 1000 ? 99 : 100, index % 1000));
+  let calls = 0; const reads: { method: string; params: unknown[] }[] = [];
+  const balanceAbi = parseAbi(["function balanceOf(address) view returns (uint256)"]);
+  const dataset = await collectBaseInvestigation(parameters, { ...source,
+    limits: { callBudget: 96, maxTransferLogs: 2000 },
+    holderPage: async () => { calls++; return { tokenAddress: token, items: [{ address: priorityHolder }], nextCursor: null }; },
+    fundingHistory: async () => { calls++; return { items: [], nextCursor: null }; },
+    rpc: async (method, params) => {
+      calls++; reads.push({ method, params });
+      if (method === "eth_getLogs") return logs;
+      if (method === "eth_getTransactionReceipt") {
+        const index = receiptHashes.indexOf(params[0] as Hash), block = index === 0 ? 99 : 100;
+        assert.notEqual(index, -1);
+        return { transactionHash: receiptHashes[index], transactionIndex: "0x0", blockNumber: quantity(block), blockHash: blockHash(block), status: "0x1", logs: logs.slice(index * 1000, (index + 1) * 1000) };
+      }
+      if (method === "eth_getTransactionCount") { assert.equal(params[1], "0x64"); return "0x1"; }
+      if (method === "eth_call" && (params[0] as { data: string }).data.startsWith("0x70a08231")) {
+        assert.equal(params[1], "0x64");
+        return encodeFunctionResult({ abi: balanceAbi, functionName: "balanceOf", result: 1n });
+      }
+      return source.rpc(method, params);
+    },
+  });
+  const activity = dataset.walletActivitySnapshot!.rows;
+  assert.equal(dataset.coverage.eligibleWallets, 2002);
+  assert.equal(dataset.evidence.length, 2000, "all acquired evidence remains available");
+  assert.equal(activity.length, 2000, "reordering must not append a second cohort beyond the validated snapshot limit");
+  assert.deepEqual(activity.find((row) => row.address === priorityHolder), { address: priorityHolder, code: "eoa", outgoingTransactionCountRaw: "1" }, "retain the already verified priority row even though it sorts after every ordinary recipient");
+  assert.equal(activity.some((row) => row.address === recipients.at(-1)), false, "a late lexical candidate stays omitted rather than displacing verified state");
+  assert.equal(new Set(activity.map((row) => row.address)).size, activity.length);
+  assert.ok(dataset.holderSnapshot!.holders.some((holder) => holder.address === recipients.at(-1)), "activity omission does not discard the separate holder candidate");
+  assert.ok(dataset.coverage.funding.some((entry) => entry.wallet === recipients.at(-1)), "omitted activity candidates retain funding coverage status");
+  assert.ok(dataset.coverage.warnings.some((warning) => warning.includes("wallet-activity row limit") && warning.includes("unknown")));
+  assert.ok(calls <= 96, "all reads share the unchanged call budget");
+  assert.deepEqual(reads.at(-1), { method: "eth_getBlockByNumber", params: ["0x64", false] }, "the mandatory final canonical read stays reserved");
+  const report = analyzeInvestigation(dataset, { id: "11111111-1111-4111-8111-111111111111", generatedAt: "2026-10-14T00:00:00.000Z" });
+  assert.ok(Buffer.byteLength(JSON.stringify(report), "utf8") <= 8 * 1024 * 1024, `Synthetic report byte size: ${Buffer.byteLength(JSON.stringify(report), "utf8")}`);
+  assert.doesNotThrow(() => validateBaseInvestigationReport(report));
+});
+
 test("deferred holder balances and funding take priority over supplemental nonce reads in a tight budget", async () => {
   const source = fixture(); let calls = 0; let balanceReads = 0; let fundingReads = 0; let finalRechecks = 0;
   const dataset = await collectBaseInvestigation(parameters, { ...source, limits: { callBudget: 30 },
@@ -1535,6 +1733,7 @@ test("a selected pair is authenticated without window swaps and excluded from wa
   for (const forged of [false, true]) {
     const source = fixture({ noSwap: true, fakePool: forged });
     const reads: { to: string; block: unknown }[] = [];
+    let quoteReads = 0;
     const dataset = await collectBaseInvestigation(parameters, { ...source,
       poolCandidates: async () => [pool],
       holderPage: async () => ({ items: [{ address: wallet }, { address: pool }], nextCursor: null }),
@@ -1542,6 +1741,15 @@ test("a selected pair is authenticated without window swaps and excluded from wa
         if (method === "eth_getLogs") return [];
         if (method === "eth_call") {
           const target = params[0] as { to: string; data: string };
+          if (target.to === pool && target.data === encodeFunctionData({ abi: exitQuoteAbi, functionName: "slot0" })) {
+            quoteReads++;
+            return encodeFunctionResult({ abi: exitQuoteAbi, functionName: "slot0", result: [1n << 96n, 0, 0, 1, 1, 0, true] });
+          }
+          if (target.to === BASE_V3_QUOTER_V2) {
+            quoteReads++;
+            if (target.data === encodeFunctionData({ abi: exitQuoteAbi, functionName: "factory" })) return encodeFunctionResult({ abi: exitQuoteAbi, functionName: "factory", result: BASE_V3_FACTORY });
+            return encodeFunctionResult({ abi: exitQuoteAbi, functionName: "quoteExactInputSingle", result: [7n, (1n << 96n) * 9n / 10n, 2, 120000n] });
+          }
           if (target.to === pool || target.to === BASE_V3_FACTORY) reads.push({ to: target.to, block: params[1] });
           if (target.to === token && target.data.startsWith("0x70a08231")) return `0x${(target.data.endsWith(pool.slice(2)) ? 90n : 10n).toString(16).padStart(64, "0")}`;
         }
@@ -1552,6 +1760,9 @@ test("a selected pair is authenticated without window swaps and excluded from wa
     assert.equal(reads.length, 5);
     assert.ok(reads.every((item) => item.block === "0x64"), "all pool proof reads use the pinned finalized block");
     assert.equal(dataset.pools.includes(pool), !forged);
+    assert.equal(quoteReads, forged ? 0 : 3, "only an authenticated selected pair can acquire a tick-aware quote");
+    assert.equal(dataset.exitQuote?.status, forged ? "unsupported" : "quoted");
+    if (!forged) { assert.equal(dataset.exitQuote?.wallet, wallet); assert.equal(dataset.exitQuote?.amountInRaw, "10"); assert.equal(dataset.exitQuote?.amountOutRaw, "7"); }
     const report = analyzeInvestigation(dataset, { id: `selected-pair-${forged}`, generatedAt: "2026-10-12T00:00:00.000Z" });
     assert.equal(report.wallets.some((item) => item.address === pool), forged);
     assert.equal(dataset.coverage.funding.some((item) => item.wallet === pool), forged);

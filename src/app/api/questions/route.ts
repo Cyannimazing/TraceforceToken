@@ -28,9 +28,12 @@ export async function POST(request: Request) {
     if (error instanceof VisitorRateLimitError) return Response.json({ error: error.message, code: "RATE_LIMITED", retryAfterSeconds: error.retryAfterSeconds }, { status: 429, headers: { "Retry-After": String(error.retryAfterSeconds), "cache-control": "private, no-store" } });
     if (error instanceof ChatContextError) return jsonError(new HttpError(410, "This scan's chat context is unavailable or expired. Run a fresh scan."));
     if (error instanceof InvestigationQuestionError) {
-      if (error.code === "OUT_OF_SCOPE") return jsonError(new HttpError(400, "Ask about this scan's funding, wallet links, accumulation, sales, evidence, or coverage."));
+      if (error.code === "OUT_OF_SCOPE") return jsonError(new HttpError(400, "No AI reply was generated for that request."));
       if (error.code === "EXPIRED_CONTEXT" || error.code === "INVALID_CONTEXT") return jsonError(new HttpError(410, "This scan's chat context is unavailable or expired. Run a fresh scan."));
       if (error.code === "TIMEOUT") return jsonError(new HttpError(504, "The answer took too long. Try a shorter question about this scan."));
+      if (error.code === "RATE_LIMITED") return Response.json({ error: "The AI service has reached its request limit. Try again after the limit resets.", code: "AI_RATE_LIMITED" }, { status: 503, headers: { "cache-control": "private, no-store" } });
+      if (error.code === "UNAVAILABLE") return Response.json({ error: "The AI service is temporarily unavailable. Try again shortly.", code: "AI_UNAVAILABLE" }, { status: 503, headers: { "cache-control": "private, no-store" } });
+      if (["INVALID_RESPONSE", "INVALID_CITATION", "RESPONSE_LIMIT"].includes(error.code)) return Response.json({ error: "The AI answer could not be verified. Try rephrasing your question about this scan.", code: "AI_RESPONSE_UNVERIFIED" }, { status: 503, headers: { "cache-control": "private, no-store" } });
       return jsonError(new HttpError(503, "The AI answer could not be verified. Try rephrasing your question about this scan."));
     }
     return jsonError(error instanceof ScanCapacityError ? new HttpError(429, error.message) : error);

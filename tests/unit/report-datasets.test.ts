@@ -1,8 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildDatasetComparison } from "../../src/components/investigation-dataset-facts";
+import { buildDatasetComparison, readableCoverageNotes } from "../../src/components/investigation-dataset-facts";
 import type { Address } from "../../src/domain/investigations/types";
 import { browserFixture, getBrowserLinkedSellingFixture, getBrowserReportFixture } from "../fixtures/report";
+
+test("human coverage notes disclose material source limits without rendering upstream text or raw values", () => {
+  const report = getBrowserReportFixture();
+  report.coverage.warnings = [
+    `SWARM context was unavailable for this scan. Secret error detail ${browserFixture.walletA}`,
+    "External discovery was limited to 512 candidate addresses; additional source candidates were not independently checked.",
+    "An external source limited its candidate list. Additional addresses may be missing from this scan.",
+    "The token-transfer record limit was reached; transfer history is partial.",
+    "RPC availability recovery used a configured fallback after verifying Base chain identity and every already-pinned range header.",
+    "Unrecognized upstream error contains 999999999999999999999999 raw units.",
+  ];
+  const notes = readableCoverageNotes(report);
+  assert.equal(notes.length, 3);
+  assert.match(notes.join(" "), /external address-list limit was reached/);
+  assert.match(notes.join(" "), /transaction-reading limit was reached/);
+  assert.doesNotMatch(notes.join(" "), /Secret|0x[0-9a-f]{40}|999999|fallback/);
+});
 
 test("dataset comparison separates token receipt records, unique transactions and eligible endpoints", () => {
   const report = getBrowserLinkedSellingFixture(), before = structuredClone(report);
@@ -45,6 +62,17 @@ test("a requested full crawl retains its explicit processed discovery ranges wit
   assert.deepEqual(facts.tokenActivity.crawl, report.coverage.transferCrawl);
   assert.equal(facts.tokenActivity.status, "partial");
   assert.equal(facts.tokenActivity.range.from.number, "100");
+  assert.deepEqual(facts.tokenActivity.missingRanges, [{ fromBlock: "0", toBlock: "99" }, { fromBlock: "121", toBlock: "199" }, { fromBlock: "251", toBlock: "400" }]);
+});
+
+test("window coverage exposes exact gaps and adjacent completed ranges leave no false gap", () => {
+  const report = getBrowserReportFixture();
+  report.coverage.transferCrawl = { scope: "window", source: "rpc-logs", completedRanges: [{ fromBlock: "200", toBlock: "210" }, { fromBlock: "100", toBlock: "150" }] };
+  assert.deepEqual(buildDatasetComparison(report).tokenActivity.missingRanges, [{ fromBlock: "151", toBlock: "199" }, { fromBlock: "211", toBlock: "400" }]);
+  report.coverage.transferCrawl.completedRanges = [{ fromBlock: "100", toBlock: "199" }, { fromBlock: "200", toBlock: "400" }];
+  assert.deepEqual(buildDatasetComparison(report).tokenActivity.missingRanges, []);
+  report.coverage.transferCrawl.completedRanges = [];
+  assert.deepEqual(buildDatasetComparison(report).tokenActivity.missingRanges, [{ fromBlock: "100", toBlock: "400" }]);
 });
 
 test("pinned positive, verified-zero, failed and unexamined balances stay separate from latest reported count", () => {

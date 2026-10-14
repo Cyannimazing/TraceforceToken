@@ -8,7 +8,7 @@ export const INVESTIGATOR_MODEL_PARAMETERS = Object.freeze({ temperature: 0, num
 export function investigatorModelfile(): string {
   if (ON_CHAIN_INVESTIGATOR.systemInstructions.includes('"""')) throw new Error("Agent instructions cannot contain a Modelfile delimiter.");
   return [
-    `# TraceForce Engine investigator profile ${ON_CHAIN_INVESTIGATOR.version}`,
+    `# TraceForge Engine investigator profile ${ON_CHAIN_INVESTIGATOR.version}`,
     "# Instruction-specialized model; not fine-tuned weights.",
     `FROM ${INVESTIGATOR_BASE_MODEL}`,
     ...Object.entries(INVESTIGATOR_MODEL_PARAMETERS).map(([name, value]) => `PARAMETER ${name} ${value}`),

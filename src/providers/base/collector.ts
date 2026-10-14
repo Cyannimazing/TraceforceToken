@@ -1,5 +1,5 @@
 import "server-only";
-import type { InvestigationDataset, ScanParameters, TokenSecuritySnapshot } from "@/domain/investigations/types";
+import type { Address, InvestigationDataset, ScanParameters, TokenSecuritySnapshot } from "@/domain/investigations/types";
 import { readProviderConfiguration, type ProviderConfiguration } from "./config";
 import { collectBaseInvestigation } from "./core";
 import { createProviderTransport, validateProviderDestination } from "./transport";
@@ -8,12 +8,12 @@ import { collectTokenMetadata } from "@/providers/token-websites";
 import { createSqdFundingQuery } from "./sqd-funding";
 import { createGoPlusTokenQuery, emptyGoPlusSnapshot } from "./goplus";
 import { goPlusTokenUrl } from "@/domain/investigations/token-security";
-import { UpstreamFailure } from "./errors";
+import { ProviderDeadlineError, UpstreamFailure } from "./errors";
 import { collectChainAndMetadata } from "./collection-parallel";
 import { createAlchemyTransferPageReader } from "./alchemy-transfers";
 import { createAlchemyFundingHistoryReader } from "./alchemy-funding";
 
-export interface CollectionOptions { signal?: AbortSignal; onProgress?: (stage: string) => Promise<void> }
+export interface CollectionOptions { signal?: AbortSignal; onProgress?: (stage: string) => Promise<void>; candidateAddresses?: Promise<readonly Address[]> }
 
 export async function collectInvestigationWithConfig(parameters: ScanParameters, configuration: ProviderConfiguration, options: CollectionOptions = {}): Promise<InvestigationDataset> {
   const deadline = createDeadline(configuration.scanTimeoutMs, options.signal ? [options.signal] : []);
@@ -33,6 +33,7 @@ export async function collectInvestigationWithConfig(parameters: ScanParameters,
         const alchemyTransport = validatedConfiguration.alchemyRpcUrl ? createProviderTransport({ ...validatedConfiguration, rpcUrl: validatedConfiguration.alchemyRpcUrl, rpcFallbackUrls: [] }, collectionSignal) : null;
         const goPlus = createGoPlusTokenQuery(configuration.timeoutMs, collectionSignal, configuration.goPlusAccessToken);
         return collectBaseInvestigation(parameters, { ...transport,
+          ...(options.candidateAddresses ? { candidateAddresses: () => options.candidateAddresses! } : {}),
           ...(alchemyTransport && (configuration.transferSource === "alchemy" || configuration.fundingSource === "alchemy") ? { indexedRpc: alchemyTransport.rpc } : {}),
           ...(configuration.transferSource === "alchemy" && alchemyTransport ? { transferPage: createAlchemyTransferPageReader(alchemyTransport.rpc) } : {}),
           ...(configuration.fundingSource === "alchemy" && alchemyTransport ? { fundingHistory: createAlchemyFundingHistoryReader(alchemyTransport.rpc), creatorFundingHistory: createAlchemyFundingHistoryReader(alchemyTransport.rpc, "outbound"), fundingIndexSource: "alchemy" as const } : {}),
@@ -61,6 +62,10 @@ export async function collectInvestigationWithConfig(parameters: ScanParameters,
     });
     signal.throwIfAborted();
     return { ...dataset, token: { ...dataset.token, ...metadata, ...(securitySnapshot ? { securitySnapshot } : {}) } };
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (signal.aborted) throw new ProviderDeadlineError();
+    throw error;
   } finally { deadline.dispose(); }
 }
 

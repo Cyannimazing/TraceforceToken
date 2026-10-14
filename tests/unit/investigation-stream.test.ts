@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getBrowserReportFixture } from "../fixtures/report";
 import { InvestigationStreamError, readInvestigationStream } from "../../src/components/investigation-stream";
+import { AI_RATE_LIMIT_SCAN_MESSAGE } from "../../src/domain/investigations/scan";
+import { proxyScanResponse } from "../../src/server/scan-proxy";
 
 const response = (events: unknown[]) => new Response(events.map((event) => JSON.stringify(event)).join("\n") + "\n", { headers: { "content-type": "application/x-ndjson" } });
 const options = () => ({ signal: new AbortController().signal, onProgress: () => undefined });
@@ -71,6 +73,60 @@ test("safe public HTTP and stream errors surface without interpreting markup", a
   await assert.rejects(readInvestigationStream(response([{ type: "error", error: message }]), options()), (error: unknown) => error instanceof InvestigationStreamError && error.message === message);
   await assert.rejects(readInvestigationStream(Response.json({ error: message }, { status: 503 }), options()), (error: unknown) => error instanceof InvestigationStreamError && error.message === message);
   for (const error of ["x".repeat(241), "Bad\u0000text", ""]) await assert.rejects(readInvestigationStream(response([{ type: "error", error }]), options()), /incomplete or invalid/);
+});
+
+test("AI quota errors retain the validated preview and use fixed public copy rather than upstream prose", async () => {
+  const analysis = baseReport(), previews: unknown[] = [];
+  await assert.rejects(readInvestigationStream(response([
+    { type: "analysis", report: analysis },
+    { type: "error", code: "AI_RATE_LIMITED", error: "Private upstream model/account details must never be displayed." },
+  ]), { ...options(), onAnalysis: (report) => previews.push(report) }), (error: unknown) => error instanceof InvestigationStreamError
+    && error.code === "AI_RATE_LIMITED" && error.message === AI_RATE_LIMIT_SCAN_MESSAGE && !error.message.includes("Private upstream"));
+  assert.deepEqual(previews, [analysis]);
+  assert.equal((previews[0] as typeof analysis).explanation, undefined, "quota failure does not promote an evidence preview to a completed report");
+  for (const invalid of [
+    { type: "error", code: "UNKNOWN_PROVIDER_CODE", error: "Untrusted private provider details" },
+    { type: "error", code: 429, error: "Untrusted private provider details" },
+    { type: "error", code: "AI_RATE_LIMITED", error: "Untrusted private provider details", upstreamBody: "untrusted" },
+  ]) {
+    let previewCount = 0;
+    await assert.rejects(readInvestigationStream(response([{ type: "analysis", report: analysis }, invalid]), { ...options(), onAnalysis: () => previewCount++ }),
+      (error: unknown) => error instanceof InvestigationStreamError && error.code === undefined && !error.message.includes("private provider"));
+    assert.equal(previewCount, 1);
+  }
+});
+
+test("the remote scan proxy preserves finite AI quota codes and canonicalizes their message before browser consumption", async () => {
+  const analysis = baseReport(), upstreamMessage = "Private upstream quota body: provider routing and account details.";
+  let requests = 0;
+  const proxied = await proxyScanResponse({ token: analysis.token.address, lookbackBlocks: 100, scope: "full" },
+    { mode: "remote", url: "https://engine.example/scan", secret: "synthetic-test-engine-secret-123456789", localTest: false }, new AbortController().signal,
+    { validateDestination: async () => undefined, fetch: async (_url, init) => {
+      requests++;
+      assert.equal(init?.redirect, "error"); assert.equal(init?.cache, "no-store");
+      return response([{ type: "analysis", report: analysis }, { type: "error", code: "AI_RATE_LIMITED", error: upstreamMessage }]);
+    } });
+  const forwarded = (await proxied.clone().text()).trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(forwarded.at(-1), { type: "error", code: "AI_RATE_LIMITED", error: AI_RATE_LIMIT_SCAN_MESSAGE });
+  assert.ok(!JSON.stringify(forwarded).includes(upstreamMessage));
+  const previews: unknown[] = [];
+  await assert.rejects(readInvestigationStream(proxied, { ...options(), onAnalysis: (report) => previews.push(report) }),
+    (error: unknown) => error instanceof InvestigationStreamError && error.code === "AI_RATE_LIMITED" && error.message === AI_RATE_LIMIT_SCAN_MESSAGE);
+  assert.deepEqual(previews, [analysis]); assert.equal(requests, 1, "quota failure does not fetch a replacement result");
+});
+
+test("the remote scan proxy rejects unknown error codes without forwarding provider details", async () => {
+  const analysis = baseReport(), previews: unknown[] = [];
+  const proxied = await proxyScanResponse({ token: analysis.token.address, lookbackBlocks: 100 },
+    { mode: "remote", url: "https://engine.example/scan", secret: "synthetic-test-engine-secret-123456789", localTest: false }, new AbortController().signal,
+    { validateDestination: async () => undefined, fetch: async () => response([
+      { type: "analysis", report: analysis }, { type: "error", code: "UNKNOWN_PROVIDER_CODE", error: "Private upstream account details." },
+    ]) });
+  const text = await proxied.clone().text();
+  assert.ok(!text.includes("UNKNOWN_PROVIDER_CODE")); assert.ok(!text.includes("Private upstream account"));
+  await assert.rejects(readInvestigationStream(proxied, { ...options(), onAnalysis: (report) => previews.push(report) }),
+    (error: unknown) => error instanceof InvestigationStreamError && error.code === undefined && /connection ended/.test(error.message));
+  assert.deepEqual(previews, [analysis]);
 });
 
 test("unknown envelopes, truncated streams and unsupported response types reject", async () => {

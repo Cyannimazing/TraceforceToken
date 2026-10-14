@@ -7,6 +7,11 @@ import { createScanEngineServer, validateEngineSecret } from "../../scripts/scan
 import { ScanCapacity } from "../../src/services/scan-capacity";
 import type { ScanDependencies } from "../../src/services/scan-stream";
 import { ChatContextError } from "../../src/agents/chat-context";
+import { InvestigationQuestionError } from "../../src/agents/questions";
+import { LocalAiError } from "../../src/agents/model-transport";
+import { AI_RATE_LIMIT_SCAN_MESSAGE } from "../../src/domain/investigations/scan";
+import { InvestigationStreamError, readInvestigationStream } from "../../src/components/investigation-stream";
+import { getBrowserReportFixture } from "../fixtures/report";
 
 const secret = "public_test_engine_secret_32_characters_long";
 const parameters = { token: `0x${"ab".repeat(20)}`, lookbackBlocks: 100 };
@@ -147,6 +152,50 @@ test("authorized questions return bounded JSON and reject malformed or expired c
     assert.equal((await fetch(`${url}/ask`, { method: "POST", headers, body: "x".repeat(48 * 1024 + 1) })).status, 413);
     assert.equal((await fetch(`${url}/ask`, { method: "POST", headers: { ...headers, authorization: "Bearer wrong" }, body: "{}" })).status, 401);
     assert.equal(questions, 1);
+  } finally { await close(server); }
+});
+
+test("private engine scan quota errors retain a validated preview and expose only the fixed AI limit code", async () => {
+  const fixture = getBrowserReportFixture(); let explanations = 0, previews = 0;
+  const limited = new LocalAiError("RATE_LIMITED"); limited.message = "Private provider quota details must stay private.";
+  const { server, url } = await listen({ capacity: new ScanCapacity(1),
+    collect: async () => ({ token: fixture.token, range: fixture.range, evidence: fixture.evidence, coverage: fixture.coverage,
+      pools: fixture.infrastructure?.pools ?? [], hubs: fixture.infrastructure?.hubs ?? [] }),
+    explain: async () => { explanations++; throw limited; },
+  });
+  try {
+    const response = await fetch(`${url}/scan`, { method: "POST", headers, body: JSON.stringify({ ...parameters, token: fixture.token.address }) });
+    assert.equal(response.status, 200, "a started scan reports quota inside its validated event stream");
+    await assert.rejects(readInvestigationStream(response, {
+      signal: new AbortController().signal, onProgress: () => undefined,
+      onAnalysis: (report) => { previews++; assert.equal(report.explanation, undefined); assert.equal(report.token.address, fixture.token.address); },
+    }), (error: unknown) => error instanceof InvestigationStreamError && error.code === "AI_RATE_LIMITED" && error.message === AI_RATE_LIMIT_SCAN_MESSAGE);
+    assert.equal(previews, 1); assert.equal(explanations, 1, "quota does not trigger a replacement inference");
+  } finally { await close(server); }
+});
+
+test("private engine questions classify typed AI quota errors as503 without treating forged codes or other failures as quota", async () => {
+  let questions = 0;
+  const limited = new InvestigationQuestionError("RATE_LIMITED"); limited.message = "Private provider quota details must stay private.";
+  const forged = Object.assign(new Error("Private provider quota details must stay private."), { name: "InvestigationQuestionError", code: "RATE_LIMITED" });
+  const failures = [limited, new InvestigationQuestionError("UNAVAILABLE"), forged];
+  const answer = { answer: "The requested fact remains unknown in this snapshot.", evidenceIds: [], caveat: "Missing evidence does not establish absence.", needsFreshScan: true };
+  const { server, url } = await listen(hangingDependencies(), undefined, { validateQuestionContext: () => undefined,
+    ask: async () => { const failure = failures[questions++]; if (failure) throw failure; return answer; },
+  });
+  try {
+    for (let index = 0; index < failures.length; index++) {
+      const response = await fetch(`${url}/ask`, { method: "POST", headers, body: JSON.stringify({ question: "Explain this scan", context: "synthetic-signed-context" }) });
+      assert.equal(response.status, 503); assert.match(response.headers.get("cache-control") ?? "", /no-store/);
+      assert.equal(response.headers.get("retry-after"), null, "an unknown provider reset time is not invented");
+      const body = await response.json();
+      if (index === 0) assert.deepEqual(body, { error: "The AI service has reached its request limit. Try again after the limit resets.", code: "AI_RATE_LIMITED" });
+      else { assert.equal(body.code, undefined); assert.equal(typeof body.error, "string"); }
+      assert.ok(!JSON.stringify(body).includes("Private provider")); assert.equal(questions, index + 1);
+    }
+    const recovered = await fetch(`${url}/ask`, { method: "POST", headers, body: JSON.stringify({ question: "Explain this scan", context: "synthetic-signed-context" }) });
+    assert.equal(recovered.status, 200); assert.deepEqual(await recovered.json(), answer);
+    assert.equal(questions, 4, "each failed turn releases shared capacity and does not retry automatically");
   } finally { await close(server); }
 });
 

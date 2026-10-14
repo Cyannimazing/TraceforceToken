@@ -22,11 +22,16 @@ export interface HolderCollectionOptions {
   totalSupplyRaw: string | null;
   block: BlockReference;
   observedWallets: readonly Address[];
+  /** External address suggestions are not observations of token activity. */
+  externalWallets?: readonly Address[];
   observedAt: string;
   sourceUrl?: string;
   provider?: HolderSnapshot["discovery"]["provider"];
   indexIndependentOfRpc?: boolean;
   page(cursor: Record<string, string | number> | null): Promise<HolderDiscoveryPage>;
+  /** Above one, the caller must supply counted reads on a fixed, authenticated
+   * RPC lane without concurrent endpoint recovery or hidden retries. */
+  balanceConcurrency?: number;
   request(method: string, params: unknown[]): Promise<unknown>;
   /** Includes real retries; supplied by the collector's shared acquisition counter. */
   remainingCalls(): number;
@@ -53,6 +58,10 @@ export async function discoverHolderCandidates(options: HolderCollectionOptions)
   for (const wallet of options.observedWallets) {
     const parsed = address.safeParse(wallet); if (!parsed.success) throw new ProviderIntegrityError();
     holders.set(parsed.data, { address: parsed.data, balanceRaw: null, status: "not_examined", discoveredBy: "observed" });
+  }
+  for (const wallet of options.externalWallets ?? []) {
+    const parsed = address.safeParse(wallet); if (!parsed.success) throw new ProviderIntegrityError();
+    if (!holders.has(parsed.data)) holders.set(parsed.data, { address: parsed.data, balanceRaw: null, status: "not_examined", discoveredBy: "external" });
   }
   const snapshot: HolderSnapshot = {
     chainId: 8453, tokenAddress: options.token, block: { ...options.block }, totalSupplyRaw: options.totalSupplyRaw,
@@ -98,7 +107,7 @@ export async function discoverHolderCandidates(options: HolderCollectionOptions)
     snapshot.discovery.reason = error instanceof ProviderBudgetError ? "The shared call budget interrupted indexed holder discovery." : isProviderThrottle(error) ? "Provider throttling stopped the optional holder phase; retained candidates remain bounded and their unchecked balances are unknown." : "The configured holder index could not complete address discovery; retained observed and indexed candidates remain explicitly bounded.";
   }
   snapshot.holders = [...holders.values()].sort((a, b) => a.address.localeCompare(b.address));
-  snapshot.discovery.addresses = snapshot.holders.filter((item) => item.discoveredBy !== "observed").length;
+  snapshot.discovery.addresses = snapshot.holders.filter((item) => item.discoveredBy === "indexed" || item.discoveredBy === "both").length;
   snapshot.balances.requestedWallets = snapshot.holders.length;
   snapshot.balances.status = !snapshot.holders.length && snapshot.discovery.status === "complete" ? "complete" : "not_examined";
   snapshot.balances.reason = "Balance verification has not started. Discovered candidates retain unknown balances until pinned RPC reads succeed.";
@@ -112,6 +121,8 @@ export async function discoverHolderCandidates(options: HolderCollectionOptions)
 export async function verifyHolderBalances(discoveryResult: HolderDiscoveryResult, options: HolderCollectionOptions): Promise<HolderSnapshot> {
   const checkAbort = () => options.signal?.throwIfAborted();
   checkAbort();
+  const concurrency = options.balanceConcurrency ?? 1;
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Balance concurrency must be an integer between one and four.");
   let snapshot: HolderSnapshot;
   try {
     if (typeof discoveryResult?.throttled !== "boolean") throw new ProviderIntegrityError();
@@ -119,21 +130,35 @@ export async function verifyHolderBalances(discoveryResult: HolderDiscoveryResul
     if (snapshot.holders.some((item) => item.status !== "not_examined" || item.balanceRaw !== null)) throw new ProviderIntegrityError();
   } catch { throw new ProviderIntegrityError("Holder discovery did not match the pending pinned balance phase."); }
   let throttled = discoveryResult.throttled || Boolean(options.throttleError?.());
-  for (const item of snapshot.holders) {
+  for (let offset = 0; offset < snapshot.holders.length;) {
     checkAbort();
-    if (options.remainingCalls() <= 0 || throttled || options.throttleError?.()) { throttled ||= Boolean(options.throttleError?.()); break; }
-    item.status = "unavailable";
-    try {
+    const remaining = options.remainingCalls();
+    if (!Number.isSafeInteger(remaining) || remaining < 0) throw new RangeError("Remaining balance-call allocation must be a nonnegative safe integer.");
+    if (remaining === 0 || throttled || options.throttleError?.()) { throttled ||= Boolean(options.throttleError?.()); break; }
+    const batch = snapshot.holders.slice(offset, offset + Math.min(concurrency, remaining));
+    // Each caller-owned read consumes one reserved allocation before it awaits
+    // I/O. Settle the entire bounded batch before any new reads or publication.
+    const results = await Promise.allSettled(batch.map(async (item) => {
+      checkAbort();
+      item.status = "unavailable";
       const value = await options.request("eth_call", [{ to: options.token, data: encodeFunctionData({ abi, functionName: "balanceOf", args: [item.address] }) }, `0x${BigInt(options.block.number).toString(16)}`]);
       checkAbort();
       if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) throw new ProviderIntegrityError("The pinned balanceOf response was not one exact uint256 ABI word.");
-      item.balanceRaw = BigInt(value).toString(); item.status = "verified";
-    } catch (error) {
-      checkAbort();
-      if (!(error instanceof UpstreamFailure) && !(error instanceof ProviderBudgetError)) throw error;
-      if (isProviderThrottle(error)) { throttled = true; break; }
-      if (error instanceof ProviderBudgetError) break;
+      return BigInt(value).toString();
+    }));
+    checkAbort();
+    let budgetEnded = false, terminalFailure = false;
+    let failure: unknown;
+    for (const [index, result] of results.entries()) {
+      const item = batch[index];
+      if (result.status === "fulfilled") { item.balanceRaw = result.value; item.status = "verified"; }
+      else if (result.reason instanceof UpstreamFailure) throttled ||= isProviderThrottle(result.reason);
+      else if (result.reason instanceof ProviderBudgetError) budgetEnded = true;
+      else if (!terminalFailure) { terminalFailure = true; failure = result.reason; }
     }
+    if (terminalFailure) throw failure;
+    offset += batch.length;
+    if (throttled || budgetEnded) break;
   }
   const verified = snapshot.holders.filter((item) => item.status === "verified");
   if (options.totalSupplyRaw !== null && verified.reduce((sum, item) => sum + BigInt(item.balanceRaw!), 0n) > BigInt(options.totalSupplyRaw)) throw new ProviderIntegrityError("Pinned token balances exceeded the reported total supply.");

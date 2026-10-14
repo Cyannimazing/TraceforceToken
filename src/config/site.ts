@@ -1,5 +1,5 @@
 export const site = {
-  name: "TraceForce Engine",
+  name: "TraceForge",
   tokenName: "Traceforge Token",
   description:
     "Trace token funding, wallet connections, early accumulation, and evidence of coordinated selling. An evidence-first investigation engine, starting on Base.",
